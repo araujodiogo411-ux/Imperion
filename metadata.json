@@ -1,0 +1,6 @@
+{
+  "name": "Imperium 2D: Simulador Mundial & Criador de Impérios",
+  "description": "Simulador interativo de mapa mundial 2D com todos os países, corte com tesoura para criar nações, união em impérios, pincel de expansão, terraformação, simulação de guerras e diplomacia.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
