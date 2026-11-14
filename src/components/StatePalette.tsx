@@ -15,10 +15,19 @@ import {
   X,
   Flag,
   Target,
+  Scissors,
+  Gift,
+  DollarSign,
 } from 'lucide-react';
 import { sound } from '../utils/audio';
+import { normalizeSearch } from '../utils/text';
 
-export type StateInteractionMode = 'paint_state' | 'move_capital' | 'add_city' | 'place_new_state';
+export type StateInteractionMode =
+  | 'paint_state'
+  | 'scissors_state'
+  | 'move_capital'
+  | 'add_city'
+  | 'place_new_state';
 
 interface StatePaletteProps {
   countries: Country[];
@@ -49,6 +58,14 @@ interface StatePaletteProps {
   ) => void;
   onStartStateWar: (country: Country, attState: StateTerritory, defState: StateTerritory) => void;
   onEndStateWar: (warId: string) => void;
+  onOpenStateFlagStudio: (state: StateTerritory) => void;
+  onDonateState: (donorCountry: Country, state: StateTerritory, recipientCountry: Country) => void;
+  onSellState: (
+    sellerCountry: Country,
+    state: StateTerritory,
+    buyerCountry: Country,
+    priceBillions: number
+  ) => void;
 }
 
 export const StatePalette: React.FC<StatePaletteProps> = ({
@@ -76,12 +93,23 @@ export const StatePalette: React.FC<StatePaletteProps> = ({
   onDeclareStateIndependence,
   onStartStateWar,
   onEndStateWar,
+  onOpenStateFlagStudio,
+  onDonateState,
+  onSellState,
 }) => {
   const [search, setSearch] = useState('');
   const [stateSearch, setStateSearch] = useState('');
   const [showCountryPicker, setShowCountryPicker] = useState(false);
   const [showAnnexPicker, setShowAnnexPicker] = useState(false);
   const [annexSearch, setAnnexSearch] = useState('');
+
+  // Donate / Sell State popups
+  const [showDonateStatePicker, setShowDonateStatePicker] = useState(false);
+  const [donateStateSearch, setDonateStateSearch] = useState('');
+  const [showSellStatePicker, setShowSellStatePicker] = useState(false);
+  const [sellStateSearch, setSellStateSearch] = useState('');
+  const [sellBuyerId, setSellBuyerId] = useState('');
+  const [sellPriceInput, setSellPriceInput] = useState('45');
 
   // Clean "Fundar Novo Estado" modal popover
   const [showNewStateModal, setShowNewStateModal] = useState(false);
@@ -106,11 +134,12 @@ export const StatePalette: React.FC<StatePaletteProps> = ({
   }, [states, selectedCountry]);
 
   const countryStates = useMemo(() => {
-    const q = stateSearch.trim().toLowerCase();
+    const q = normalizeSearch(stateSearch);
     return q
       ? allCountryStates.filter(
           (s) =>
-            s.name.toLowerCase().includes(q) || s.capitalCity.toLowerCase().includes(q)
+            normalizeSearch(s.name).includes(q) ||
+            normalizeSearch(s.capitalCity).includes(q)
         )
       : allCountryStates;
   }, [allCountryStates, stateSearch]);
@@ -121,25 +150,50 @@ export const StatePalette: React.FC<StatePaletteProps> = ({
   }, [stateWars, selectedCountry]);
 
   const filteredCountries = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const list = q ? countries.filter((c) => c.name.toLowerCase().includes(q)) : countries;
+    const q = normalizeSearch(search);
+    const list = q
+      ? countries.filter((c) => normalizeSearch(c.name).includes(q))
+      : countries;
     return list.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
   }, [countries, search]);
 
   const annexTargets = useMemo(() => {
     if (!selectedCountry) return [];
-    const q = annexSearch.trim().toLowerCase();
+    const q = normalizeSearch(annexSearch);
     return countries
       .filter((c) => c.id !== selectedCountry.id && c.territoryCells > 0)
-      .filter((c) => (!q ? true : c.name.toLowerCase().includes(q)))
+      .filter((c) => (!q ? true : normalizeSearch(c.name).includes(q)))
       .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
   }, [countries, selectedCountry, annexSearch]);
 
   const filteredWarStates = useMemo(() => {
-    const q = warStateSearch.trim().toLowerCase();
+    const q = normalizeSearch(warStateSearch);
     const active = allCountryStates.filter((s) => s.territoryCells > 0);
-    return q ? active.filter((s) => s.name.toLowerCase().includes(q)) : active;
+    return q ? active.filter((s) => normalizeSearch(s.name).includes(q)) : active;
   }, [allCountryStates, warStateSearch]);
+
+  const donateCandidates = useMemo(() => {
+    if (!selectedCountry) return [];
+    const q = normalizeSearch(donateStateSearch);
+    return countries
+      .filter((c) => c.id !== selectedCountry.id && c.territoryCells > 0)
+      .filter((c) => (!q ? true : normalizeSearch(c.name).includes(q)))
+      .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  }, [countries, selectedCountry, donateStateSearch]);
+
+  const sellCandidates = useMemo(() => {
+    if (!selectedCountry) return [];
+    const q = normalizeSearch(sellStateSearch);
+    return countries
+      .filter((c) => c.id !== selectedCountry.id && c.territoryCells > 0)
+      .filter((c) => (!q ? true : normalizeSearch(c.name).includes(q)))
+      .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  }, [countries, selectedCountry, sellStateSearch]);
+
+  const suggestStatePrice = (st: StateTerritory | null): number => {
+    if (!st) return 30;
+    return Math.max(5, Math.round(st.territoryCells * 1.4));
+  };
 
   const openNewStateCreator = () => {
     sound.playClick();
@@ -150,6 +204,8 @@ export const StatePalette: React.FC<StatePaletteProps> = ({
     setShowCountryPicker(false);
     setShowAnnexPicker(false);
     setShowStateWarModal(false);
+    setShowDonateStatePicker(false);
+    setShowSellStatePicker(false);
   };
 
   const openStateWarCreator = () => {
@@ -164,13 +220,15 @@ export const StatePalette: React.FC<StatePaletteProps> = ({
     setShowNewStateModal(false);
     setShowCountryPicker(false);
     setShowAnnexPicker(false);
+    setShowDonateStatePicker(false);
+    setShowSellStatePicker(false);
   };
 
   return (
-    <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center gap-2 pointer-events-auto max-w-[95vw]">
+    <div className="absolute bottom-2 sm:bottom-4 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center gap-2 pointer-events-auto w-[calc(100vw-0.75rem)] sm:w-auto max-w-[96vw]">
       {/* Country Picker Popup */}
       {showCountryPicker && (
-        <div className="w-80 bg-slate-900/95 backdrop-blur-md border border-slate-700 rounded-xl shadow-2xl p-3 space-y-2">
+        <div className="w-80 max-w-[calc(100vw-1rem)] bg-slate-900/95 backdrop-blur-md border border-slate-700 rounded-xl shadow-2xl p-3 space-y-2">
           <div className="relative">
             <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
             <input
@@ -207,7 +265,7 @@ export const StatePalette: React.FC<StatePaletteProps> = ({
 
       {/* Clean "Fundar Novo Estado" Modal Popover */}
       {showNewStateModal && selectedCountry && (
-        <div className="w-96 bg-slate-900/98 backdrop-blur-md border border-emerald-500/50 rounded-xl shadow-2xl p-4 space-y-3 text-xs">
+        <div className="w-96 max-w-[calc(100vw-1rem)] bg-slate-900/98 backdrop-blur-md border border-emerald-500/50 rounded-xl shadow-2xl p-4 space-y-3 text-xs">
           <div className="flex items-center justify-between">
             <span className="font-bold text-emerald-300 flex items-center gap-1.5 text-sm">
               <Plus className="w-4 h-4" /> Fundar Novo Estado em {selectedCountry.name}
@@ -309,7 +367,7 @@ export const StatePalette: React.FC<StatePaletteProps> = ({
 
       {/* Inter-State Civil War Panel */}
       {showStateWarModal && selectedCountry && (
-        <div className="w-96 bg-slate-900/98 backdrop-blur-md border border-orange-500/50 rounded-xl shadow-2xl p-3.5 space-y-2.5 text-xs">
+        <div className="w-96 max-w-[calc(100vw-1rem)] bg-slate-900/98 backdrop-blur-md border border-orange-500/50 rounded-xl shadow-2xl p-3.5 space-y-2.5 text-xs">
           <div className="flex items-center justify-between">
             <span className="font-bold text-orange-300 flex items-center gap-1.5">
               <Swords className="w-4 h-4" /> Guerra entre Estados ({selectedCountry.name})
@@ -403,7 +461,7 @@ export const StatePalette: React.FC<StatePaletteProps> = ({
 
       {/* Annex Foreign Country as State (War) Popup */}
       {showAnnexPicker && selectedCountry && (
-        <div className="w-80 bg-slate-900/95 backdrop-blur-md border border-red-500/40 rounded-xl shadow-2xl p-3 space-y-2">
+        <div className="w-80 max-w-[calc(100vw-1rem)] bg-slate-900/95 backdrop-blur-md border border-red-500/40 rounded-xl shadow-2xl p-3 space-y-2">
           <div className="flex items-center justify-between text-xs">
             <span className="font-bold text-red-300 flex items-center gap-1.5">
               <Swords className="w-3.5 h-3.5" /> Conquistar País como Estado
@@ -443,9 +501,136 @@ export const StatePalette: React.FC<StatePaletteProps> = ({
         </div>
       )}
 
+      {/* Donate State Picker Popup */}
+      {showDonateStatePicker && selectedCountry && selectedState && (
+        <div className="w-84 max-w-[calc(100vw-1rem)] bg-slate-900/98 backdrop-blur-md border border-purple-500/50 rounded-xl shadow-2xl p-3 space-y-2 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="font-bold text-purple-300 flex items-center gap-1.5">
+              <Gift className="w-3.5 h-3.5" /> Doar Estado {selectedState.name}
+            </span>
+            <button onClick={() => setShowDonateStatePicker(false)} className="text-slate-400 hover:text-white">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <p className="text-[11px] text-slate-400">
+            Transferir o estado <strong>{selectedState.name}</strong> gratuitamente para outro país:
+          </p>
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
+            <input
+              type="text"
+              value={donateStateSearch}
+              onChange={(e) => setDonateStateSearch(e.target.value)}
+              placeholder="Pesquisar país recebedor..."
+              autoFocus
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white focus:outline-none focus:border-purple-400"
+            />
+          </div>
+          <div className="max-h-44 overflow-y-auto space-y-1 pr-1">
+            {donateCandidates.map((target) => (
+              <button
+                key={target.id}
+                onClick={() => {
+                  sound.playPeaceChime();
+                  onDonateState(selectedCountry, selectedState, target);
+                  setShowDonateStatePicker(false);
+                }}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left hover:bg-purple-950/50 text-slate-200 transition-colors"
+              >
+                <FlagView flag={target.flag} width={20} height={14} />
+                <span className="truncate flex-1 font-medium">{target.name}</span>
+                <span className="text-[10px] text-purple-300 font-semibold">Doar Estado</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Sell State Picker Popup */}
+      {showSellStatePicker && selectedCountry && selectedState && (
+        <div className="w-96 max-w-[calc(100vw-1rem)] bg-slate-900/98 backdrop-blur-md border border-emerald-500/50 rounded-xl shadow-2xl p-3.5 space-y-2.5 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="font-bold text-emerald-300 flex items-center gap-1.5">
+              <DollarSign className="w-4 h-4" /> Vender Estado {selectedState.name}
+            </span>
+            <button onClick={() => setShowSellStatePicker(false)} className="text-slate-400 hover:text-white">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <p className="text-[11px] text-slate-400">
+            Área: <strong>{selectedState.territoryCells} px</strong> · Preço sugerido:{' '}
+            <strong className="text-emerald-300 font-mono-numbers">
+              ${suggestStatePrice(selectedState)} Bi
+            </strong>
+          </p>
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
+            <input
+              type="text"
+              value={sellStateSearch}
+              onChange={(e) => setSellStateSearch(e.target.value)}
+              placeholder="Pesquisar país comprador..."
+              autoFocus
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white focus:outline-none focus:border-emerald-400"
+            />
+          </div>
+          <div className="max-h-36 overflow-y-auto space-y-1 pr-1">
+            {sellCandidates.map((buyer) => (
+              <button
+                key={buyer.id}
+                type="button"
+                onClick={() => {
+                  sound.playClick();
+                  setSellBuyerId(buyer.id);
+                }}
+                className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left transition-colors ${
+                  sellBuyerId === buyer.id
+                    ? 'bg-emerald-500/20 border border-emerald-500/50 text-emerald-200'
+                    : 'hover:bg-slate-800 text-slate-200'
+                }`}
+              >
+                <FlagView flag={buyer.flag} width={20} height={14} />
+                <span className="truncate flex-1 font-medium">{buyer.name}</span>
+                <span className="text-[10px] text-slate-400 font-mono-numbers">
+                  PIB ${buyer.gdp.toLocaleString()} Bi
+                </span>
+              </button>
+            ))}
+          </div>
+          {sellBuyerId && (
+            <div className="flex items-center gap-2 pt-2 border-t border-slate-800">
+              <span className="text-[11px] text-slate-400 shrink-0">Preço ($ Bi):</span>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={sellPriceInput}
+                onChange={(e) => setSellPriceInput(e.target.value)}
+                className="flex-1 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-white font-mono-numbers focus:outline-none focus:border-emerald-400"
+              />
+              <button
+                type="button"
+                disabled={Number(sellPriceInput) <= 0}
+                onClick={() => {
+                  const buyer = countries.find((c) => c.id === sellBuyerId);
+                  const price = Math.max(1, Number(sellPriceInput) || 0);
+                  if (buyer) {
+                    onSellState(selectedCountry, selectedState, buyer, price);
+                    setShowSellStatePicker(false);
+                  }
+                }}
+                className="px-3 py-1 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-slate-950 font-bold rounded text-[11px] transition-colors"
+              >
+                Propor Venda
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Rename State Popup */}
       {editingStateId && (
-        <div className="w-80 bg-slate-900/95 backdrop-blur-md border border-amber-500/40 rounded-xl shadow-2xl p-3 space-y-2 text-xs">
+        <div className="w-80 max-w-[calc(100vw-1rem)] bg-slate-900/95 backdrop-blur-md border border-amber-500/40 rounded-xl shadow-2xl p-3 space-y-2 text-xs">
           <div className="flex items-center justify-between">
             <span className="font-bold text-amber-300">Editar Estado &amp; Capital</span>
             <button onClick={() => setEditingStateId(null)} className="text-slate-400 hover:text-white">
@@ -482,7 +667,7 @@ export const StatePalette: React.FC<StatePaletteProps> = ({
       )}
 
       {/* Main States Dock */}
-      <div className="bg-slate-900/95 backdrop-blur-md border border-slate-700/90 rounded-xl shadow-2xl p-3 flex flex-col gap-2.5 w-[860px] max-w-[95vw] text-xs">
+      <div className="bg-slate-900/95 backdrop-blur-md border border-slate-700/90 rounded-xl shadow-2xl p-2.5 sm:p-3 flex flex-col gap-2 sm:gap-2.5 w-full sm:w-[860px] max-w-[96vw] max-h-[42vh] sm:max-h-none overflow-y-auto sm:overflow-visible text-xs">
         {/* Top Row: Country Selection + Actions */}
         <div className="flex items-center gap-1.5 flex-wrap">
           <button
@@ -533,6 +718,22 @@ export const StatePalette: React.FC<StatePaletteProps> = ({
             }`}
           >
             <span>Pintar Estado</span>
+          </button>
+
+          <button
+            onClick={() => {
+              sound.playClick();
+              onChangeInteractionMode('scissors_state');
+            }}
+            className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg border transition-colors ${
+              interactionMode === 'scissors_state'
+                ? 'bg-lime-400 text-slate-950 border-lime-300 font-bold'
+                : 'bg-slate-800 text-lime-300 border-slate-700 hover:text-white'
+            }`}
+            title="Desenhe um corte dentro do país para fundar um novo Estado com bandeira"
+          >
+            <Scissors className="w-3.5 h-3.5" />
+            <span>Tesoura (Novo Estado)</span>
           </button>
 
           <button
@@ -658,127 +859,214 @@ export const StatePalette: React.FC<StatePaletteProps> = ({
           </div>
         )}
 
-        {/* States List + Selected State Controls */}
-        {selectedCountry && (interactionMode === 'paint_state' || interactionMode === 'place_new_state') && (
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <span className="text-[11px] text-slate-400">
-                Estados de <strong className="text-white">{selectedCountry.name}</strong> ({countryStates.length}):
+        {interactionMode === 'scissors_state' && (
+          <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-lime-950/40 border border-lime-500/45 rounded-lg text-[11px] text-lime-200">
+            <div className="flex items-center gap-2">
+              <Scissors className="w-4 h-4 text-lime-400 shrink-0" />
+              <span>
+                Arraste dentro de <strong>{selectedCountry?.name || 'um país'}</strong> para cortar e fundar um novo Estado com nome, capital e bandeira!
               </span>
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <div className="relative">
-                  <Search className="w-3 h-3 text-slate-400 absolute left-2 top-1.5" />
-                  <input
-                    type="text"
-                    value={stateSearch}
-                    onChange={(e) => setStateSearch(e.target.value)}
-                    placeholder="Buscar estado..."
-                    className="w-28 bg-slate-950 border border-slate-700 rounded pl-6 pr-2 py-0.5 text-[11px] text-white focus:outline-none focus:border-amber-400"
-                  />
-                </div>
-                <span className="text-[11px] text-slate-400">Pincel:</span>
-                <input
-                  type="range"
-                  min={2}
-                  max={35}
-                  value={brushRadius}
-                  onChange={(e) => onChangeRadius(Number(e.target.value))}
-                  className="w-14 accent-emerald-400 cursor-pointer"
-                />
-                <span className="font-mono-numbers text-slate-200 w-4">{brushRadius}</span>
-
-                {/* Swap National Capital to Selected State's Capital */}
-                {selectedState && (
-                  <button
-                    onClick={() => {
-                      sound.playClick();
-                      onSetCapitalFromState(selectedCountry, selectedState);
-                    }}
-                    className="flex items-center gap-1 px-2 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/35 text-cyan-200 border border-cyan-500/40 font-semibold text-[11px] transition-colors"
-                    title={`Trocar a capital de ${selectedCountry.name} para ${selectedState.capitalCity} (${selectedState.name})`}
-                  >
-                    <Crown className="w-3 h-3 text-amber-400" />
-                    Tornar {selectedState.capitalCity} Capital
-                  </button>
-                )}
-
-                {selectedState && selectedState.territoryCells > 0 && (
-                  <>
-                    <button
-                      onClick={() => {
-                        sound.playImperialFanfare();
-                        onDeclareStateIndependence(selectedCountry, selectedState, false);
-                      }}
-                      className="flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-[11px] transition-colors"
-                      title={`Tornar ${selectedState.name} independente pacificamente`}
-                    >
-                      <Flag className="w-3 h-3" /> Independência
-                    </button>
-                    <button
-                      onClick={() => {
-                        sound.playWarCannon();
-                        onDeclareStateIndependence(selectedCountry, selectedState, true);
-                      }}
-                      className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-600/25 hover:bg-red-600/45 text-red-300 border border-red-500/40 font-bold text-[11px] transition-colors"
-                      title={`Proclamar guerra pela independência de ${selectedState.name} contra ${selectedCountry.name}`}
-                    >
-                      <Swords className="w-3 h-3" /> Guerra Independência
-                    </button>
-                  </>
-                )}
-              </div>
             </div>
+            <button
+              onClick={() => onChangeInteractionMode('paint_state')}
+              className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700 shrink-0"
+            >
+              Voltar ao Pincel
+            </button>
+          </div>
+        )}
 
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-              <button
-                onClick={openNewStateCreator}
-                className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-dashed border-emerald-500/70 bg-emerald-950/30 text-emerald-300 hover:bg-emerald-950/60 shrink-0 font-bold"
-              >
-                <Plus className="w-3.5 h-3.5" /> Fundar Estado
-              </button>
+        {/* States List + Selected State Controls */}
+        {selectedCountry &&
+          (interactionMode === 'paint_state' ||
+            interactionMode === 'scissors_state' ||
+            interactionMode === 'place_new_state') && (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-[11px] text-slate-400">
+                  Estados de <strong className="text-white">{selectedCountry.name}</strong> ({countryStates.length}):
+                </span>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <div className="relative">
+                    <Search className="w-3 h-3 text-slate-400 absolute left-2 top-1.5" />
+                    <input
+                      type="text"
+                      value={stateSearch}
+                      onChange={(e) => setStateSearch(e.target.value)}
+                      placeholder="Buscar estado..."
+                      className="w-28 bg-slate-950 border border-slate-700 rounded pl-6 pr-2 py-0.5 text-[11px] text-white focus:outline-none focus:border-amber-400"
+                    />
+                  </div>
+                  <span className="text-[11px] text-slate-400">Pincel:</span>
+                  <input
+                    type="range"
+                    min={2}
+                    max={35}
+                    value={brushRadius}
+                    onChange={(e) => onChangeRadius(Number(e.target.value))}
+                    className="w-14 accent-emerald-400 cursor-pointer"
+                  />
+                  <span className="font-mono-numbers text-slate-200 w-4">{brushRadius}</span>
+                </div>
+              </div>
 
-              {countryStates.map((st) => {
-                const isActive = selectedState?.id === st.id;
-                return (
-                  <div
-                    key={st.id}
-                    className={`flex items-center gap-1 px-2 py-1 rounded-lg border shrink-0 transition-colors ${
-                      isActive
-                        ? 'bg-slate-800 border-amber-400 text-white shadow-sm'
-                        : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-600'
-                    }`}
-                  >
+              {/* Selected State Quick Actions Strip */}
+              {selectedState && (
+                <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 bg-slate-950/90 border border-slate-800 rounded-lg flex-wrap">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <FlagView
+                      flag={selectedState.flag || selectedCountry.flag}
+                      width={24}
+                      height={16}
+                      className="border border-white/25 shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <span className="font-bold text-white truncate block leading-tight">
+                        {selectedState.name}
+                      </span>
+                      <span className="text-[10px] text-slate-400">
+                        Cap: {selectedState.capitalCity} · {selectedState.territoryCells} px
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1 flex-wrap">
                     <button
                       onClick={() => {
                         sound.playClick();
-                        onSelectState(st);
+                        onOpenStateFlagStudio(selectedState);
                       }}
-                      className="flex items-center gap-1.5 text-left"
-                      title={`${st.name} · Capital: ${st.capitalCity}`}
+                      className="flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 font-semibold text-[11px] transition-colors"
+                      title={`Mudar ou desenhar a bandeira de ${selectedState.name}`}
                     >
-                      <span
-                        className="w-2.5 h-2.5 rounded-full shrink-0 border border-white/25"
-                        style={{ backgroundColor: st.color }}
-                      />
-                      <span className="font-medium whitespace-nowrap">{st.name}</span>
+                      <Flag className="w-3 h-3" /> Bandeira
                     </button>
+
                     <button
                       onClick={() => {
-                        setEditingStateId(st.id);
-                        setEditName(st.name);
-                        setEditCap(st.capitalCity);
+                        sound.playClick();
+                        onSetCapitalFromState(selectedCountry, selectedState);
                       }}
-                      className="text-slate-500 hover:text-amber-300 ml-0.5 p-0.5"
-                      title="Renomear estado ou mudar capital do estado"
+                      className="flex items-center gap-1 px-2 py-1 rounded bg-cyan-500/20 hover:bg-cyan-500/35 text-cyan-200 border border-cyan-500/40 font-semibold text-[11px] transition-colors"
+                      title={`Trocar a capital de ${selectedCountry.name} para ${selectedState.capitalCity} (${selectedState.name})`}
                     >
-                      <Edit3 className="w-3 h-3" />
+                      <Crown className="w-3 h-3 text-amber-400" />
+                      {selectedState.capitalCity} Capital
                     </button>
+
+                    {selectedState.territoryCells > 0 && (
+                      <>
+                        <button
+                          onClick={() => {
+                            sound.playClick();
+                            setShowDonateStatePicker((v) => !v);
+                            setShowSellStatePicker(false);
+                            setDonateStateSearch('');
+                          }}
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-purple-500/20 hover:bg-purple-500/35 text-purple-300 border border-purple-500/40 font-semibold text-[11px] transition-colors"
+                          title={`Doar o estado ${selectedState.name} para outro país`}
+                        >
+                          <Gift className="w-3 h-3" /> Doar
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            sound.playClick();
+                            setSellPriceInput(String(suggestStatePrice(selectedState)));
+                            setSellBuyerId('');
+                            setSellStateSearch('');
+                            setShowSellStatePicker((v) => !v);
+                            setShowDonateStatePicker(false);
+                          }}
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-500/20 hover:bg-emerald-500/35 text-emerald-300 border border-emerald-500/40 font-semibold text-[11px] transition-colors"
+                          title={`Vender o estado ${selectedState.name} para outro país`}
+                        >
+                          <DollarSign className="w-3 h-3" /> Vender
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            sound.playImperialFanfare();
+                            onDeclareStateIndependence(selectedCountry, selectedState, false);
+                          }}
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-[11px] transition-colors"
+                          title={`Tornar ${selectedState.name} independente pacificamente`}
+                        >
+                          <Flag className="w-3 h-3" /> Independência
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            sound.playWarCannon();
+                            onDeclareStateIndependence(selectedCountry, selectedState, true);
+                          }}
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-red-600/25 hover:bg-red-600/45 text-red-300 border border-red-500/40 font-bold text-[11px] transition-colors"
+                          title={`Proclamar guerra pela independência de ${selectedState.name} contra ${selectedCountry.name}`}
+                        >
+                          <Swords className="w-3 h-3" /> Guerra Indep.
+                        </button>
+                      </>
+                    )}
                   </div>
-                );
-              })}
+                </div>
+              )}
+
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+                <button
+                  onClick={openNewStateCreator}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-dashed border-emerald-500/70 bg-emerald-950/30 text-emerald-300 hover:bg-emerald-950/60 shrink-0 font-bold"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Fundar Estado
+                </button>
+
+                {countryStates.map((st) => {
+                  const isActive = selectedState?.id === st.id;
+                  return (
+                    <div
+                      key={st.id}
+                      className={`flex items-center gap-1 px-2 py-1 rounded-lg border shrink-0 transition-colors ${
+                        isActive
+                          ? 'bg-slate-800 border-amber-400 text-white shadow-sm'
+                          : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-600'
+                      }`}
+                    >
+                      <button
+                        onClick={() => {
+                          sound.playClick();
+                          onSelectState(st);
+                        }}
+                        className="flex items-center gap-1.5 text-left"
+                        title={`${st.name} · Capital: ${st.capitalCity}`}
+                      >
+                        <FlagView
+                          flag={st.flag || selectedCountry.flag}
+                          width={18}
+                          height={12}
+                          className="shrink-0"
+                        />
+                        <span
+                          className="w-2 h-2 rounded-full shrink-0 border border-white/25"
+                          style={{ backgroundColor: st.color }}
+                        />
+                        <span className="font-medium whitespace-nowrap">{st.name}</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          setEditingStateId(st.id);
+                          setEditName(st.name);
+                          setEditCap(st.capitalCity);
+                        }}
+                        className="text-slate-500 hover:text-amber-300 ml-0.5 p-0.5"
+                        title="Renomear estado ou mudar capital do estado"
+                      >
+                        <Edit3 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        )}
+          )}
       </div>
     </div>
   );

@@ -1,5 +1,10 @@
 import { Country, Continent, TechEra, Ideology } from '../types/game';
-import { REAL_COUNTRY_STATES } from './worldStates';
+import {
+  REAL_COUNTRY_STATES,
+  ADMIN1_STATES,
+  ADMIN1_KEY_ALIASES,
+  resolveStateMetadata,
+} from './worldStates';
 import worldAtlas from 'world-atlas/countries-110m.json';
 import * as topojson from 'topojson-client';
 import type { FeatureCollection, Geometry } from 'geojson';
@@ -353,6 +358,14 @@ export function buildInitialWorldCountries(): Country[] {
     const alpha2 = meta?.alpha2 || 'un';
     const color = meta?.color || ATLAS_PALETTE[(idx * 7 + 3) % ATLAS_PALETTE.length];
 
+    const adminKey = ADMIN1_KEY_ALIASES[rawName] || rawName;
+    const adminStates = ADMIN1_STATES[adminKey];
+    const resolvedStates =
+      adminStates && adminStates.length > 0
+        ? adminStates.map((s) => resolveStateMetadata(rawName, s.n).name)
+        : REAL_COUNTRY_STATES[rawName]?.map((s) => s.name) ||
+          meta?.states || ['Região Norte', 'Região Central', 'Região Sul'];
+
     result.push({
       id: `${alpha2.toUpperCase()}_${numericId}`,
       numericId,
@@ -386,16 +399,34 @@ export function buildInitialWorldCountries(): Country[] {
       enemies: [],
       decrees: meta?.decrees || ['Constituição Nacional', 'Desenvolvimento Regional'],
       territoryCells: 0,
-      states:
-        REAL_COUNTRY_STATES[rawName]?.map((s) => s.name) ||
-        meta?.states ||
-        ['Região Norte', 'Região Central', 'Região Sul'],
+      states: resolvedStates,
       normX: 0.5,
       normY: 0.5,
       centerX: 700,
       centerY: 350,
     });
   });
+
+  // Link real-world autonomous territories / dependencies (e.g. Greenland -> Denmark)
+  // while keeping each territory's own name, flag, and map borders intact
+  const sovereignByRawName: Record<string, string> = {
+    'Greenland': 'Denmark',
+    'Puerto Rico': 'United States of America',
+    'Falkland Is.': 'United Kingdom',
+    'New Caledonia': 'France',
+    'Fr. S. Antarctic Lands': 'France',
+  };
+
+  for (const country of result) {
+    const sovRaw = sovereignByRawName[country.originalName];
+    if (sovRaw) {
+      const sov = result.find((c) => c.originalName === sovRaw);
+      if (sov) {
+        country.sovereignCountryId = sov.id;
+        country.sovereignCountryName = sov.name;
+      }
+    }
+  }
 
   return result;
 }

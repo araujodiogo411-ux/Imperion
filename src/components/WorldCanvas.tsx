@@ -9,6 +9,7 @@ import {
   TERRAIN_RIVER,
   TERRAIN_LAND,
   CutResult,
+  StateCutResult,
 } from '../utils/mapEngine';
 import { StateInteractionMode } from './StatePalette';
 import { FlagView } from './FlagView';
@@ -33,11 +34,13 @@ interface WorldCanvasProps {
   dayNightAngle: number;
   showDayNight: boolean;
   showLabels: boolean;
+  showAllStates: boolean;
   isPaused: boolean;
   simSpeed: number;
   onSelectCountry: (country: Country | null) => void;
   onEyedropperPick: (country: Country) => void;
   onCutFinished: (cutResult: CutResult) => void;
+  onStateCutFinished: (cutResult: StateCutResult) => void;
   onTerritoryUpdated: () => void;
   onStateUpdated: () => void;
   onMoveCapital: (gx: number, gy: number) => void;
@@ -64,11 +67,13 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
   dayNightAngle,
   showDayNight,
   showLabels,
+  showAllStates,
   isPaused,
   simSpeed,
   onSelectCountry,
   onEyedropperPick,
   onCutFinished,
+  onStateCutFinished,
   onTerritoryUpdated,
   onStateUpdated,
   onMoveCapital,
@@ -81,9 +86,28 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
   // Camera Pan & Zoom
   const [scale, setScale] = useState(1.0);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const scaleRef = useRef(1.0);
+  const panRef = useRef({ x: 0, y: 0 });
   const viewSizeRef = useRef({ width: 1200, height: 600, dpr: 1 });
 
-  // Pointer & Drag States
+  useEffect(() => {
+    scaleRef.current = scale;
+  }, [scale]);
+
+  useEffect(() => {
+    panRef.current = pan;
+  }, [pan]);
+
+  // Pointer, Multi-touch Pinch & Drag States
+  const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchStartRef = useRef<{
+    dist: number;
+    midX: number;
+    midY: number;
+    scale: number;
+    panX: number;
+    panY: number;
+  } | null>(null);
   const isPanningRef = useRef(false);
   const panStartRef = useRef({ x: 0, y: 0 });
   const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null);
@@ -451,9 +475,13 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
           ctx.fillText('LINHA DO EQUADOR', eqScreenX, eqScreenY);
         }
 
-        // 6b. Country & Empire Labels (with collision avoidance)
+        // 6b. Country & Empire Labels (with accurate sublabel bounding-box collision avoidance)
         const processedEmpires = new Set<string>();
         const placedBoxes: { x1: number; y1: number; x2: number; y2: number }[] = [];
+        const countryLabelInfo = new Map<
+          string,
+          { box: { x1: number; y1: number; x2: number; y2: number }; hasSubLabel: boolean }
+        >();
 
         const sorted = countriesRef.current
           .slice()
@@ -467,7 +495,7 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
 
           const empire = c.empireId ? empireMapRef.current.get(c.empireId) : null;
           let labelText = c.name;
-          let subLabel = scale >= 2.3 ? `★ ${c.capital}` : '';
+          let subLabel = c.sovereignCountryName ? `(${c.sovereignCountryName})` : '';
           let worldX = c.centerX;
           let worldY = c.centerY;
           let isEmpire = false;
@@ -499,22 +527,31 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
           if (sx < -80 || sx > vw + 80 || sy < -40 || sy > vh + 40) continue;
 
           const fontSize = isEmpire
-            ? Math.min(18, Math.max(12, 12 + scale * 1.4))
-            : Math.min(14, Math.max(10, 9.5 + scale * 1.1));
+            ? Math.min(17, Math.max(11.5, 11.5 + scale * 1.3))
+            : Math.min(13.5, Math.max(9.5, 9 + scale * 1.0));
+          const subFont = Math.max(8, fontSize * 0.74);
 
           ctx.font = isEmpire
             ? `700 ${fontSize}px Cinzel, serif`
             : `600 ${fontSize}px "Plus Jakarta Sans", system-ui, sans-serif`;
 
           const textW = ctx.measureText(labelText).width;
-          const boxW = textW + 12;
-          const boxH = subLabel ? fontSize * 2.1 : fontSize + 6;
+          let subW = 0;
+          if (subLabel) {
+            ctx.font = `500 ${subFont}px "Plus Jakarta Sans", system-ui, sans-serif`;
+            subW = ctx.measureText(subLabel).width;
+            ctx.font = isEmpire
+              ? `700 ${fontSize}px Cinzel, serif`
+              : `600 ${fontSize}px "Plus Jakarta Sans", system-ui, sans-serif`;
+          }
 
+          const boxW = Math.max(textW, subW) + 14;
+          const subOffset = fontSize * 0.92;
           const box = {
             x1: sx - boxW / 2,
-            y1: sy - boxH / 2,
+            y1: sy - fontSize * 0.65 - 3,
             x2: sx + boxW / 2,
-            y2: sy + boxH / 2,
+            y2: subLabel ? sy + subOffset + subFont * 0.6 + 4 : sy + fontSize * 0.65 + 3,
           };
 
           let overlaps = false;
@@ -528,11 +565,14 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
           }
           if (overlaps) continue;
           placedBoxes.push(box);
+          if (!isEmpire) {
+            countryLabelInfo.set(c.id, { box, hasSubLabel: !!subLabel });
+          }
 
           ctx.lineJoin = 'round';
           ctx.miterLimit = 2;
           ctx.strokeStyle = 'rgba(2, 6, 23, 0.92)';
-          ctx.lineWidth = 3.2;
+          ctx.lineWidth = 3.0;
           ctx.strokeText(labelText, sx, sy);
 
           ctx.fillStyle = isEmpire
@@ -543,19 +583,26 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
           ctx.fillText(labelText, sx, sy);
 
           if (subLabel) {
-            ctx.font = `500 ${Math.max(9, fontSize * 0.78)}px "Plus Jakarta Sans", system-ui, sans-serif`;
-            ctx.lineWidth = 2.6;
-            ctx.strokeText(subLabel, sx, sy + fontSize * 0.95);
+            ctx.font = `500 ${subFont}px "Plus Jakarta Sans", system-ui, sans-serif`;
+            ctx.lineWidth = 2.4;
+            ctx.strokeText(subLabel, sx, sy + subOffset);
             ctx.fillStyle = 'rgba(226, 232, 240, 0.95)';
-            ctx.fillText(subLabel, sx, sy + fontSize * 0.95);
+            ctx.fillText(subLabel, sx, sy + subOffset);
           }
         }
 
-        // 6c. Internal State Labels when in States mode for selectedCountry
-        if (currentTool === 'states' && selectedCountry) {
-          const activeStates = statesRef.current.filter(
-            (st) => st.countryId === selectedCountry.id && st.territoryCells > 0
-          );
+        // 6c. Internal State Labels (in States mode, when Show All States is active, or zoomed in on selected country)
+        const showSelectedCountryStates =
+          selectedCountry &&
+          (currentTool === 'states' || showAllStates || scale >= 1.65);
+        const showWorldStatesOnZoom = showAllStates && scale >= 1.4;
+
+        if (showSelectedCountryStates || showWorldStatesOnZoom) {
+          const activeStates = showWorldStatesOnZoom
+            ? statesRef.current.filter((st) => st.territoryCells > 0)
+            : statesRef.current.filter(
+                (st) => st.countryId === selectedCountry!.id && st.territoryCells > 0
+              );
           const stateBoxes: { x1: number; y1: number; x2: number; y2: number }[] = [];
 
           for (const st of activeStates) {
@@ -564,7 +611,7 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
             if (sx < -60 || sx > vw + 60 || sy < -30 || sy > vh + 30) continue;
 
             const isChosen = selectedState?.id === st.id;
-            const stFont = Math.min(13, Math.max(9.5, 8.5 + scale * 1.1));
+            const stFont = Math.min(12.5, Math.max(9, 8.2 + scale * 1.05));
             ctx.font = `${isChosen ? '700' : '600'} ${stFont}px "Plus Jakarta Sans", sans-serif`;
             const tw = ctx.measureText(st.name).width + 8;
             const b = { x1: sx - tw / 2, y1: sy - stFont / 2, x2: sx + tw / 2, y2: sy + stFont / 2 };
@@ -581,7 +628,7 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
             if (hit) continue;
             stateBoxes.push(b);
 
-            ctx.lineWidth = 2.8;
+            ctx.lineWidth = 2.6;
             ctx.strokeStyle = 'rgba(2, 6, 23, 0.95)';
             ctx.strokeText(st.name, sx, sy);
             ctx.fillStyle = isChosen ? '#fde047' : '#ffffff';
@@ -589,35 +636,138 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
           }
         }
 
-        // 6d. National Capitals (when moved or zoomed) & Custom Cities
-        for (const c of countriesRef.current) {
-          if (c.capitalX !== undefined && c.capitalY !== undefined && c.territoryCells > 0) {
-            const moved = Math.hypot(c.capitalX - c.centerX, c.capitalY - c.centerY) > 4;
-            if (moved || (currentTool === 'states' && selectedCountry?.id === c.id)) {
-              const cx = pan.x + (offsetX + (c.capitalX / GRID_WIDTH) * baseW) * scale;
-              const cy = pan.y + (offsetY + (c.capitalY / GRID_HEIGHT) * baseH) * scale;
-              ctx.font = '700 11px "Plus Jakarta Sans", sans-serif';
-              ctx.lineWidth = 3;
-              ctx.strokeStyle = 'rgba(2, 6, 23, 0.95)';
-              ctx.strokeText(`★ ${c.capital}`, cx, cy);
-              ctx.fillStyle = '#fbbf24';
-              ctx.fillText(`★ ${c.capital}`, cx, cy);
+        // 6d. National Capitals (compact typography + collision avoidance against country/sublabel/neighbor capitals)
+        const capitalBoxes: { x1: number; y1: number; x2: number; y2: number }[] = [];
+        const capFont = Math.min(9.5, Math.max(7.2, 6.8 + scale * 0.55));
+        ctx.font = `600 ${capFont}px "Plus Jakarta Sans", sans-serif`;
+        ctx.lineWidth = 2.2;
+
+        const capCandidates = sorted
+          .filter(
+            (c) =>
+              c.capitalX !== undefined &&
+              c.capitalY !== undefined &&
+              c.territoryCells > 0
+          )
+          .sort((a, b) => {
+            const aSel = selectedCountry?.id === a.id ? 1 : 0;
+            const bSel = selectedCountry?.id === b.id ? 1 : 0;
+            if (aSel !== bSel) return bSel - aSel;
+            return b.territoryCells - a.territoryCells;
+          });
+
+        for (const c of capCandidates) {
+          const isSelected = selectedCountry?.id === c.id;
+          const moved = Math.hypot(c.capitalX! - c.centerX, c.capitalY! - c.centerY) > 4;
+          const inStatesModeForSelected = currentTool === 'states' && isSelected;
+
+          const visibleByZoom =
+            inStatesModeForSelected ||
+            (isSelected && scale >= 1.15) ||
+            (moved && scale >= 1.8 && (isSelected || c.territoryCells >= minCellsForZoom)) ||
+            (!moved && scale >= 2.65 && c.territoryCells >= minCellsForZoom);
+
+          if (!visibleByZoom) continue;
+
+          const cx = pan.x + (offsetX + (c.capitalX! / GRID_WIDTH) * baseW) * scale;
+          const baseCy = pan.y + (offsetY + (c.capitalY! / GRID_HEIGHT) * baseH) * scale;
+          const capText = `★ ${c.capital}`;
+          const capW = ctx.measureText(capText).width + 8;
+          const capH = capFont + 5;
+
+          const ownInfo = countryLabelInfo.get(c.id);
+          let cy = baseCy;
+          if (!moved && !inStatesModeForSelected) {
+            if (ownInfo) {
+              cy = ownInfo.box.y2 + capH / 2 + 2;
+            } else {
+              cy = baseCy + (c.sovereignCountryName ? 24 : 14);
             }
           }
+
+          if (cx < -60 || cx > vw + 60 || cy < -30 || cy > vh + 30) continue;
+
+          let capBox = {
+            x1: cx - capW / 2,
+            y1: cy - capH / 2,
+            x2: cx + capW / 2,
+            y2: cy + capH / 2,
+          };
+
+          const collidesAny = (b: { x1: number; y1: number; x2: number; y2: number }) => {
+            for (const pb of placedBoxes) {
+              if (b.x1 < pb.x2 && b.x2 > pb.x1 && b.y1 < pb.y2 && b.y2 > pb.y1) return true;
+            }
+            for (const cb of capitalBoxes) {
+              if (b.x1 < cb.x2 && b.x2 > cb.x1 && b.y1 < cb.y2 && b.y2 > cb.y1) return true;
+            }
+            return false;
+          };
+
+          if (collidesAny(capBox)) {
+            if (isSelected && ownInfo && !moved) {
+              const altCy = ownInfo.box.y1 - capH / 2 - 2;
+              const altBox = {
+                x1: cx - capW / 2,
+                y1: altCy - capH / 2,
+                x2: cx + capW / 2,
+                y2: altCy + capH / 2,
+              };
+              if (!collidesAny(altBox)) {
+                cy = altCy;
+                capBox = altBox;
+              } else {
+                continue;
+              }
+            } else if (!inStatesModeForSelected) {
+              continue;
+            }
+          }
+
+          capitalBoxes.push(capBox);
+          ctx.strokeStyle = 'rgba(2, 6, 23, 0.94)';
+          ctx.strokeText(capText, cx, cy);
+          ctx.fillStyle = isSelected ? '#fde047' : 'rgba(251, 191, 36, 0.92)';
+          ctx.fillText(capText, cx, cy);
         }
 
+        // 6e. Custom Cities (with collision avoidance against capitals & other cities)
+        const cityBoxes: { x1: number; y1: number; x2: number; y2: number }[] = [];
         for (const ct of citiesRef.current) {
           const cx = pan.x + (offsetX + (ct.x / GRID_WIDTH) * baseW) * scale;
           const cy = pan.y + (offsetY + (ct.y / GRID_HEIGHT) * baseH) * scale;
           if (cx < -60 || cx > vw + 60 || cy < -30 || cy > vh + 30) continue;
 
           const marker = ct.isStateCapital ? '◆' : '●';
-          ctx.font = '600 10.5px "Plus Jakarta Sans", sans-serif';
-          ctx.lineWidth = 2.6;
+          const cityText = `${marker} ${ct.name}`;
+          ctx.font = '600 9.5px "Plus Jakarta Sans", sans-serif';
+          const cw = ctx.measureText(cityText).width + 6;
+          const ch = 13;
+          const cBox = { x1: cx - cw / 2, y1: cy - ch / 2, x2: cx + cw / 2, y2: cy + ch / 2 };
+
+          let hit = false;
+          for (const cb of capitalBoxes) {
+            if (cBox.x1 < cb.x2 && cBox.x2 > cb.x1 && cBox.y1 < cb.y2 && cBox.y2 > cb.y1) {
+              hit = true;
+              break;
+            }
+          }
+          if (!hit) {
+            for (const ctb of cityBoxes) {
+              if (cBox.x1 < ctb.x2 && cBox.x2 > ctb.x1 && cBox.y1 < ctb.y2 && cBox.y2 > ctb.y1) {
+                hit = true;
+                break;
+              }
+            }
+          }
+          if (hit) continue;
+          cityBoxes.push(cBox);
+
+          ctx.lineWidth = 2.4;
           ctx.strokeStyle = 'rgba(2, 6, 23, 0.95)';
-          ctx.strokeText(`${marker} ${ct.name}`, cx, cy);
+          ctx.strokeText(cityText, cx, cy);
           ctx.fillStyle = ct.isStateCapital ? '#38bdf8' : '#e2e8f0';
-          ctx.fillText(`${marker} ${ct.name}`, cx, cy);
+          ctx.fillText(cityText, cx, cy);
         }
       }
 
@@ -641,6 +791,7 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
     dayNightAngle,
     showDayNight,
     showLabels,
+    showAllStates,
     getBaseMapRect,
   ]);
 
@@ -663,6 +814,50 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
     return () => {
       ro.disconnect();
       window.removeEventListener('resize', updateSize);
+    };
+  }, []);
+
+  // Native non-passive wheel & Safari gesture zoom ONLY on the map canvas (prevents page/UI zoom!)
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const handleNativeWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const curScale = scaleRef.current;
+      const curPan = panRef.current;
+      const zoomFactor = e.deltaY < 0 ? 1.15 : 0.87;
+      const newScale = Math.max(0.8, Math.min(10.0, curScale * zoomFactor));
+
+      const rect = canvas.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+
+      const newPanX = mouseX - (mouseX - curPan.x) * (newScale / curScale);
+      const newPanY = mouseY - (mouseY - curPan.y) * (newScale / curScale);
+
+      scaleRef.current = newScale;
+      panRef.current = { x: newPanX, y: newPanY };
+      setScale(newScale);
+      setPan({ x: newPanX, y: newPanY });
+    };
+
+    const preventBrowserGesture = (e: Event) => {
+      e.preventDefault();
+    };
+
+    canvas.addEventListener('wheel', handleNativeWheel, { passive: false });
+    canvas.addEventListener('gesturestart', preventBrowserGesture, { passive: false });
+    canvas.addEventListener('gesturechange', preventBrowserGesture, { passive: false });
+    canvas.addEventListener('gestureend', preventBrowserGesture, { passive: false });
+
+    return () => {
+      canvas.removeEventListener('wheel', handleNativeWheel);
+      canvas.removeEventListener('gesturestart', preventBrowserGesture);
+      canvas.removeEventListener('gesturechange', preventBrowserGesture);
+      canvas.removeEventListener('gestureend', preventBrowserGesture);
     };
   }, []);
 
@@ -758,6 +953,42 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     e.currentTarget.setPointerCapture(e.pointerId);
+    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    // Two-finger touch pinch-to-zoom & pan on mobile/tablet
+    if (activePointersRef.current.size >= 2) {
+      isPanningRef.current = false;
+      isPaintingRef.current = false;
+      lastPaintPointRef.current = null;
+      if (isCutting) {
+        setIsCutting(false);
+        scissorsPathRef.current = [];
+      }
+      setHoverInfo(null);
+
+      const pts = Array.from(activePointersRef.current.values());
+      const p1 = pts[0];
+      const p2 = pts[1];
+      const dist = Math.max(1, Math.hypot(p2.x - p1.x, p2.y - p1.y));
+      const rect = e.currentTarget.getBoundingClientRect();
+      const midX = (p1.x + p2.x) / 2 - rect.left;
+      const midY = (p1.y + p2.y) / 2 - rect.top;
+
+      pinchStartRef.current = {
+        dist,
+        midX,
+        midY,
+        scale: scaleRef.current,
+        panX: panRef.current.x,
+        panY: panRef.current.y,
+      };
+      return;
+    }
+
+    if (e.pointerType === 'touch') {
+      setHoverInfo(null);
+    }
+
     const gridPos = clientToGrid(e.clientX, e.clientY);
 
     pointerDownPosRef.current = { x: e.clientX, y: e.clientY };
@@ -780,7 +1011,7 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
     // Middle click, Right click, Alt+drag, or Select mode pans the camera
     if (e.button === 1 || e.button === 2 || e.altKey || currentTool === 'select') {
       isPanningRef.current = true;
-      panStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
+      panStartRef.current = { x: e.clientX - panRef.current.x, y: e.clientY - panRef.current.y };
       return;
     }
 
@@ -799,7 +1030,30 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
         onCarveNewState(gridPos.x, gridPos.y);
         return;
       }
+      if (stateInteractionMode === 'scissors_state') {
+        const idx = engine.getIndex(gridPos.x, gridPos.y);
+        const clickedOwner = engine.owner[idx];
+        if (!selectedCountry && clickedOwner > 0) {
+          const found = numIdMapRef.current.get(clickedOwner);
+          if (found) onSelectCountry(found);
+        }
+        sound.playScissors();
+        setIsCutting(true);
+        scissorsPathRef.current = [gridPos];
+        return;
+      }
       if (stateInteractionMode === 'paint_state') {
+        const idx = engine.getIndex(gridPos.x, gridPos.y);
+        const clickedOwner = engine.owner[idx];
+        // Clicking any other country directly in Estados mode switches to its states!
+        if (clickedOwner > 0 && (!selectedCountry || clickedOwner !== selectedCountry.numericId)) {
+          const found = numIdMapRef.current.get(clickedOwner);
+          if (found) {
+            sound.playClick();
+            onSelectCountry(found);
+            return;
+          }
+        }
         isPaintingRef.current = true;
         lastPaintPointRef.current = gridPos;
         applyPaintStroke([gridPos]);
@@ -825,6 +1079,34 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (activePointersRef.current.has(e.pointerId)) {
+      activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+
+    // Active 2-finger pinch zoom & pan on mobile
+    if (activePointersRef.current.size >= 2 && pinchStartRef.current) {
+      const pts = Array.from(activePointersRef.current.values());
+      const p1 = pts[0];
+      const p2 = pts[1];
+      const newDist = Math.max(1, Math.hypot(p2.x - p1.x, p2.y - p1.y));
+      const rect = e.currentTarget.getBoundingClientRect();
+      const newMidX = (p1.x + p2.x) / 2 - rect.left;
+      const newMidY = (p1.y + p2.y) / 2 - rect.top;
+
+      const ps = pinchStartRef.current;
+      const newScale = Math.max(0.8, Math.min(10.0, ps.scale * (newDist / ps.dist)));
+      const worldMidX = (ps.midX - ps.panX) / ps.scale;
+      const worldMidY = (ps.midY - ps.panY) / ps.scale;
+      const newPanX = newMidX - worldMidX * newScale;
+      const newPanY = newMidY - worldMidY * newScale;
+
+      scaleRef.current = newScale;
+      panRef.current = { x: newPanX, y: newPanY };
+      setScale(newScale);
+      setPan({ x: newPanX, y: newPanY });
+      return;
+    }
+
     const gridPos = clientToGrid(e.clientX, e.clientY);
     cursorGridRef.current = gridPos;
 
@@ -836,14 +1118,16 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
         );
         if (d > 5) didPanDragRef.current = true;
       }
-      setPan({
+      const nextPan = {
         x: e.clientX - panStartRef.current.x,
         y: e.clientY - panStartRef.current.y,
-      });
+      };
+      panRef.current = nextPan;
+      setPan(nextPan);
       return;
     }
 
-    if (gridPos && !isCutting && !isPaintingRef.current) {
+    if (e.pointerType !== 'touch' && gridPos && !isCutting && !isPaintingRef.current) {
       const idx = engine.getIndex(gridPos.x, gridPos.y);
       const t = engine.terrain[idx];
       const o = engine.owner[idx];
@@ -851,7 +1135,11 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
       const country = o > 0 ? numIdMapRef.current.get(o) || null : null;
       const empire = country?.empireId ? empireMapRef.current.get(country.empireId) || null : null;
       const state =
-        s > 0 && engine.activeStateViewCountryNumId === o
+        s > 0 &&
+        (engine.activeStateViewCountryNumId === o ||
+          showAllStates ||
+          selectedCountry?.numericId === o ||
+          currentTool === 'states')
           ? stateNumIdMapRef.current.get(s) || null
           : null;
 
@@ -868,7 +1156,7 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
         state,
         terrainLabel,
       });
-    } else if (!gridPos) {
+    } else if (!gridPos || e.pointerType === 'touch') {
       setHoverInfo(null);
     }
 
@@ -890,6 +1178,14 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    activePointersRef.current.delete(e.pointerId);
+
+    if (pinchStartRef.current) {
+      if (activePointersRef.current.size < 2) {
+        pinchStartRef.current = null;
+      }
+      return;
     }
 
     if (isPanningRef.current) {
@@ -919,20 +1215,39 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
       scissorsPathRef.current = [];
       if (path.length >= 4) {
         sound.playScissors();
-        const maxNumericId = countriesRef.current.reduce(
-          (max, c) => Math.max(max, c.numericId),
-          0
-        );
-        const cutResult = engine.cutWithFreehandPath(
-          path,
-          maxNumericId + 1,
-          countriesRef.current,
-          empiresRef.current,
-          statesRef.current
-        );
-        if (cutResult && cutResult.cellCount >= 8) {
-          onCutFinished(cutResult);
-          onTerritoryUpdated();
+        if (currentTool === 'states' && stateInteractionMode === 'scissors_state' && selectedCountry) {
+          const maxStateNumId = statesRef.current.reduce(
+            (max, s) => Math.max(max, s.numericId),
+            0
+          );
+          const stateCut = engine.cutStateWithFreehandPath(
+            path,
+            selectedCountry,
+            maxStateNumId + 1,
+            countriesRef.current,
+            empiresRef.current,
+            statesRef.current
+          );
+          if (stateCut && stateCut.cellCount >= 4) {
+            onStateCutFinished(stateCut);
+            onStateUpdated();
+          }
+        } else {
+          const maxNumericId = countriesRef.current.reduce(
+            (max, c) => Math.max(max, c.numericId),
+            0
+          );
+          const cutResult = engine.cutWithFreehandPath(
+            path,
+            maxNumericId + 1,
+            countriesRef.current,
+            empiresRef.current,
+            statesRef.current
+          );
+          if (cutResult && cutResult.cellCount >= 8) {
+            onCutFinished(cutResult);
+            onTerritoryUpdated();
+          }
         }
       }
     }
@@ -948,26 +1263,28 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
     }
   };
 
-  const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    const zoomFactor = e.deltaY < 0 ? 1.18 : 0.85;
-    const newScale = Math.max(0.8, Math.min(10.0, scale * zoomFactor));
-
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-
-    const newPanX = mouseX - (mouseX - pan.x) * (newScale / scale);
-    const newPanY = mouseY - (mouseY - pan.y) * (newScale / scale);
-
-    setScale(newScale);
-    setPan({ x: newPanX, y: newPanY });
+  const handlePointerCancel = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    activePointersRef.current.delete(e.pointerId);
+    if (activePointersRef.current.size < 2) {
+      pinchStartRef.current = null;
+    }
+    isPanningRef.current = false;
+    if (isCutting) {
+      setIsCutting(false);
+      scissorsPathRef.current = [];
+    }
+    if (isPaintingRef.current) {
+      isPaintingRef.current = false;
+      lastPaintPointRef.current = null;
+      if (currentTool === 'states') onStateUpdated();
+      else onTerritoryUpdated();
+    }
   };
 
   const handleResetCamera = () => {
     sound.playClick();
+    scaleRef.current = 1.0;
+    panRef.current = { x: 0, y: 0 };
     setScale(1.0);
     setPan({ x: 0, y: 0 });
   };
@@ -976,18 +1293,18 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
     <div
       ref={containerRef}
       onContextMenu={(e) => e.preventDefault()}
-      className="relative w-full h-full overflow-hidden bg-[#071122]"
+      className="relative w-full h-full overflow-hidden bg-[#071122] touch-none"
     >
       <canvas
         ref={canvasRef}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
         onPointerLeave={() => {
           cursorGridRef.current = null;
           setHoverInfo(null);
         }}
-        onWheel={handleWheel}
         className={`w-full h-full block touch-none select-none ${
           isEyedropperActive ||
           currentTool === 'scissors' ||
@@ -1006,18 +1323,21 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
       {/* Instant Hover Country / State Tooltip */}
       {hoverInfo && (
         <div
-          className="pointer-events-none fixed z-30 bg-slate-900/95 backdrop-blur-md border border-slate-700/90 rounded-lg px-3 py-2 shadow-xl flex items-center gap-2.5 text-xs transition-opacity duration-75"
+          className="pointer-events-none fixed z-30 bg-slate-900/95 backdrop-blur-md border border-slate-700/90 rounded-lg px-3 py-2 shadow-xl flex items-center gap-2.5 text-xs transition-opacity duration-75 max-w-[calc(100vw-1rem)]"
           style={{
-            left: Math.min(window.innerWidth - 220, hoverInfo.x + 18),
+            left: Math.min(window.innerWidth - 220, Math.max(8, hoverInfo.x + 18)),
             top: Math.max(66, hoverInfo.y + 42),
           }}
         >
           {hoverInfo.country ? (
             <>
               <FlagView
-                flag={hoverInfo.empire ? hoverInfo.empire.flag : hoverInfo.country.flag}
-                width={28}
-                height={19}
+                flag={
+                  hoverInfo.state?.flag ||
+                  (hoverInfo.empire ? hoverInfo.empire.flag : hoverInfo.country.flag)
+                }
+                width={30}
+                height={20}
               />
               <div>
                 <div className="font-bold text-white leading-tight">
@@ -1032,6 +1352,8 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
                     ? `Capital Estadual: ${hoverInfo.state.capitalCity}`
                     : hoverInfo.empire
                     ? `Província: ${hoverInfo.country.name}`
+                    : hoverInfo.country.sovereignCountryName
+                    ? `Território de ${hoverInfo.country.sovereignCountryName} · ${hoverInfo.country.capital}`
                     : `${hoverInfo.country.capital} · ${hoverInfo.country.continent}`}
                 </div>
               </div>
@@ -1042,25 +1364,33 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
         </div>
       )}
 
-      {/* Camera Zoom Controls */}
-      <div className="absolute bottom-5 left-5 flex items-center gap-1 p-1 bg-slate-900/90 backdrop-blur-md rounded-lg border border-slate-700/80 shadow-xl z-20 text-xs">
+      {/* Camera Zoom Controls (Map-only zoom) */}
+      <div className="absolute bottom-24 right-2.5 sm:bottom-5 sm:left-5 sm:right-auto flex items-center gap-1 p-1 bg-slate-900/90 backdrop-blur-md rounded-lg border border-slate-700/80 shadow-xl z-20 text-xs">
         <button
           onClick={() => {
             sound.playClick();
-            setScale((s) => Math.min(10.0, s * 1.25));
+            setScale((s) => {
+              const next = Math.min(10.0, s * 1.25);
+              scaleRef.current = next;
+              return next;
+            });
           }}
           className="w-8 h-8 flex items-center justify-center font-bold text-slate-300 hover:text-white hover:bg-slate-800 rounded transition-colors"
           title="Aproximar Zoom"
         >
           +
         </button>
-        <span className="px-2 font-mono-numbers text-slate-300 text-[11px] min-w-12 text-center">
+        <span className="px-1.5 sm:px-2 font-mono-numbers text-slate-300 text-[11px] min-w-10 sm:min-w-12 text-center">
           {Math.round(scale * 100)}%
         </span>
         <button
           onClick={() => {
             sound.playClick();
-            setScale((s) => Math.max(0.8, s * 0.8));
+            setScale((s) => {
+              const next = Math.max(0.8, s * 0.8);
+              scaleRef.current = next;
+              return next;
+            });
           }}
           className="w-8 h-8 flex items-center justify-center font-bold text-slate-300 hover:text-white hover:bg-slate-800 rounded transition-colors"
           title="Afastar Zoom"
@@ -1070,7 +1400,7 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
         <div className="w-[1px] h-4 bg-slate-700 mx-0.5" />
         <button
           onClick={handleResetCamera}
-          className="px-2.5 py-1 text-[11px] font-medium text-slate-300 hover:text-white hover:bg-slate-800 rounded transition-colors"
+          className="px-2 sm:px-2.5 py-1 text-[11px] font-medium text-slate-300 hover:text-white hover:bg-slate-800 rounded transition-colors"
         >
           Centralizar
         </button>

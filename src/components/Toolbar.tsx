@@ -56,9 +56,9 @@ export const Toolbar: React.FC<ToolbarProps> = ({
     currentTool === 'river';
 
   return (
-    <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-2 pointer-events-none">
+    <div className="absolute top-2 sm:top-3 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-2 pointer-events-none max-w-[calc(100vw-0.75rem)]">
       {/* Primary Tools Dock */}
-      <div className="flex items-center gap-1 p-1 bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl shadow-2xl pointer-events-auto">
+      <div className="flex items-center gap-1 p-1 bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl shadow-2xl pointer-events-auto max-w-full overflow-x-auto no-scrollbar">
         <button
           onClick={() => handleToolClick('select')}
           className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap ${

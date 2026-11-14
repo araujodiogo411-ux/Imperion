@@ -7,6 +7,7 @@ import {
   ADMIN1_KEY_ALIASES,
   resolveStateMetadata,
 } from '../data/worldStates';
+import { getRealStateFlag } from '../data/stateFlags';
 import { geoNaturalEarth1, geoPath, GeoProjection } from 'd3-geo';
 import type { Feature, Polygon, MultiPolygon } from 'geojson';
 
@@ -22,6 +23,14 @@ export interface CutResult {
   newNumericId: number;
   cellCount: number;
   sourceCountryNames: string[];
+  centroid: { x: number; y: number };
+}
+
+export interface StateCutResult {
+  newStateNumericId: number;
+  countryId: string;
+  cellCount: number;
+  sourceStateNames: string[];
   centroid: { x: number; y: number };
 }
 
@@ -71,7 +80,13 @@ export class WorldMapEngine {
 
   // Optional: currently inspected country ID in States mode (draws internal state borders & colors)
   public activeStateViewCountryNumId: number | null = null;
+  public selectedCountryNumId: number | null = null;
+  public showAllStatesOnMap: boolean = false;
   private stateColorCache = new Map<number, [number, number, number]>();
+  private cachedRegionCapitals = new Map<
+    string,
+    { name: string; capital: string; x: number; y: number }[]
+  >();
 
   constructor() {
     this.width = GRID_WIDTH;
@@ -257,7 +272,7 @@ export class WorldMapEngine {
 
     this.generateShallowCoasts();
     this.generateNightLights(countries);
-    this.recalculateTerritoryCounts(countries);
+    this.recalculateTerritoryCounts(countries, states);
     this.refreshFullBuffer(countries, empires, states);
     this.isInitialized = true;
   }
@@ -686,9 +701,13 @@ export class WorldMapEngine {
 
           let isStateBorder = false;
           if (o > 0) {
-            // If viewing states for this country, color by stateOwner!
-            if (activeStateCountryNumId && o === activeStateCountryNumId) {
-              const sId = this.stateOwner[idx];
+            const sId = this.stateOwner[idx];
+            const isActiveStateCountry = activeStateCountryNumId === o;
+            const isSelectedCountry = this.selectedCountryNumId === o;
+            const showStatesHere =
+              sId > 0 && (isActiveStateCountry || this.showAllStatesOnMap || isSelectedCountry);
+
+            if (isActiveStateCountry) {
               const sRgb = sId > 0 ? this.stateColorCache.get(sId) : undefined;
               if (sRgb) {
                 r = sRgb[0];
@@ -702,17 +721,29 @@ export class WorldMapEngine {
                   b = rgb[2];
                 }
               }
-              const rState = x < w - 1 ? this.stateOwner[idx + 1] : sId;
-              const bState = y < h - 1 ? this.stateOwner[idx + w] : sId;
-              if (sId > 0 && (rState !== sId || bState !== sId)) {
-                isStateBorder = true;
-              }
             } else {
               const rgb = numIdToColor.get(o);
               if (rgb) {
                 r = rgb[0];
                 g = rgb[1];
                 b = rgb[2];
+              }
+              if (showStatesHere) {
+                const sRgb = this.stateColorCache.get(sId);
+                if (sRgb) {
+                  const mix = this.showAllStatesOnMap ? 0.34 : 0.22;
+                  r = Math.round(r * (1 - mix) + sRgb[0] * mix);
+                  g = Math.round(g * (1 - mix) + sRgb[1] * mix);
+                  b = Math.round(b * (1 - mix) + sRgb[2] * mix);
+                }
+              }
+            }
+
+            if (showStatesHere) {
+              const rState = x < w - 1 ? this.stateOwner[idx + 1] : sId;
+              const bState = y < h - 1 ? this.stateOwner[idx + w] : sId;
+              if (rState !== sId || bState !== sId) {
+                isStateBorder = true;
               }
             }
           }
@@ -750,10 +781,316 @@ export class WorldMapEngine {
     );
   }
 
-  public recalculateTerritoryCounts(countries: Country[]) {
+  private isNearOwned(x: number, y: number, numId: number, radius: number = 0): boolean {
+    const ix = Math.round(x);
+    const iy = Math.round(y);
+    if (ix < 0 || ix >= this.width || iy < 0 || iy >= this.height) return false;
+    if (radius <= 0) {
+      const idx = iy * this.width + ix;
+      return this.terrain[idx] === TERRAIN_LAND && this.owner[idx] === numId;
+    }
+    const r2 = radius * radius;
+    const x0 = Math.max(0, ix - radius);
+    const x1 = Math.min(this.width - 1, ix + radius);
+    const y0 = Math.max(0, iy - radius);
+    const y1 = Math.min(this.height - 1, iy + radius);
+    for (let py = y0; py <= y1; py++) {
+      for (let px = x0; px <= x1; px++) {
+        if ((px - ix) * (px - ix) + (py - iy) * (py - iy) > r2) continue;
+        const idx = py * this.width + px;
+        if (this.terrain[idx] === TERRAIN_LAND && this.owner[idx] === numId) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Finds a guaranteed interior point on the LARGEST connected landmass component of `numId`
+   * using a lightweight 12x12 bucket grid over its bounding box.
+   */
+  private findCoreInteriorPoint(
+    numId: number,
+    restrictStateNumId?: number
+  ): { x: number; y: number } | null {
+    const minX = this.countryMinX[numId];
+    const maxX = this.countryMaxX[numId];
+    const minY = this.countryMinY[numId];
+    const maxY = this.countryMaxY[numId];
+    if (minX > maxX || minY > maxY || maxX < 0) return null;
+
+    const BUCKET = 12;
+    const cols = Math.max(1, Math.floor((maxX - minX) / BUCKET) + 1);
+    const rows = Math.max(1, Math.floor((maxY - minY) / BUCKET) + 1);
+    const totalBuckets = cols * rows;
+
+    const bCount = new Int32Array(totalBuckets);
+    const bSumX = new Float64Array(totalBuckets);
+    const bSumY = new Float64Array(totalBuckets);
+    const w = this.width;
+
+    for (let y = minY; y <= maxY; y++) {
+      const by = Math.floor((y - minY) / BUCKET);
+      const rowOffset = y * w;
+      for (let x = minX; x <= maxX; x++) {
+        const idx = rowOffset + x;
+        if (this.owner[idx] !== numId || this.terrain[idx] !== TERRAIN_LAND) continue;
+        if (restrictStateNumId !== undefined && this.stateOwner[idx] !== restrictStateNumId) {
+          continue;
+        }
+        const bx = Math.floor((x - minX) / BUCKET);
+        const bi = by * cols + bx;
+        bCount[bi]++;
+        bSumX[bi] += x;
+        bSumY[bi] += y;
+      }
+    }
+
+    const visited = new Uint8Array(totalBuckets);
+    let bestComponentCount = 0;
+    let bestSumX = 0;
+    let bestSumY = 0;
+    let bestBuckets: number[] = [];
+    const queue: number[] = [];
+
+    for (let i = 0; i < totalBuckets; i++) {
+      if (bCount[i] === 0 || visited[i]) continue;
+      visited[i] = 1;
+      queue.length = 0;
+      queue.push(i);
+      let head = 0;
+      let compCount = 0;
+      let compSumX = 0;
+      let compSumY = 0;
+      const compBuckets: number[] = [];
+
+      while (head < queue.length) {
+        const cur = queue[head++];
+        compBuckets.push(cur);
+        compCount += bCount[cur];
+        compSumX += bSumX[cur];
+        compSumY += bSumY[cur];
+
+        const cx = cur % cols;
+        const cy = (cur - cx) / cols;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = cx + dx;
+            const ny = cy + dy;
+            if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+            const ni = ny * cols + nx;
+            if (!visited[ni] && bCount[ni] > 0) {
+              visited[ni] = 1;
+              queue.push(ni);
+            }
+          }
+        }
+      }
+
+      if (compCount > bestComponentCount) {
+        bestComponentCount = compCount;
+        bestSumX = compSumX;
+        bestSumY = compSumY;
+        bestBuckets = compBuckets;
+      }
+    }
+
+    if (bestComponentCount === 0) return null;
+
+    const targetX = Math.max(0, Math.min(w - 1, Math.round(bestSumX / bestComponentCount)));
+    const targetY = Math.max(0, Math.min(this.height - 1, Math.round(bestSumY / bestComponentCount)));
+
+    const tIdx = targetY * w + targetX;
+    if (
+      this.terrain[tIdx] === TERRAIN_LAND &&
+      this.owner[tIdx] === numId &&
+      (restrictStateNumId === undefined || this.stateOwner[tIdx] === restrictStateNumId)
+    ) {
+      return { x: targetX, y: targetY };
+    }
+
+    // Snap to closest owned pixel inside the winning landmass component
+    let bestPx = targetX;
+    let bestPy = targetY;
+    let bestDistSq = Infinity;
+
+    for (const bi of bestBuckets) {
+      const bx = bi % cols;
+      const by = (bi - bx) / cols;
+      const xStart = minX + bx * BUCKET;
+      const xEnd = Math.min(maxX, xStart + BUCKET - 1);
+      const yStart = minY + by * BUCKET;
+      const yEnd = Math.min(maxY, yStart + BUCKET - 1);
+
+      for (let y = yStart; y <= yEnd; y++) {
+        for (let x = xStart; x <= xEnd; x++) {
+          const idx = y * w + x;
+          if (this.owner[idx] !== numId || this.terrain[idx] !== TERRAIN_LAND) continue;
+          if (restrictStateNumId !== undefined && this.stateOwner[idx] !== restrictStateNumId) {
+            continue;
+          }
+          const d2 = (x - targetX) * (x - targetX) + (y - targetY) * (y - targetY);
+          if (d2 < bestDistSq) {
+            bestDistSq = d2;
+            bestPx = x;
+            bestPy = y;
+          }
+        }
+      }
+    }
+
+    return { x: bestPx, y: bestPy };
+  }
+
+  private getRegionalCapitalsForCountry(
+    originalName: string
+  ): { name: string; capital: string; x: number; y: number }[] {
+    const cached = this.cachedRegionCapitals.get(originalName);
+    if (cached) return cached;
+
+    const list: { name: string; capital: string; x: number; y: number }[] = [];
+    if (!this.projection) return list;
+
+    const adminKey = ADMIN1_KEY_ALIASES[originalName] || originalName;
+    const admin1List = ADMIN1_STATES[adminKey];
+    if (admin1List && admin1List.length > 0) {
+      const pathGen = geoPath(this.projection);
+      for (const entry of admin1List) {
+        const feature: Feature<MultiPolygon> = {
+          type: 'Feature',
+          properties: {},
+          geometry: { type: 'MultiPolygon', coordinates: entry.p },
+        };
+        const cent = pathGen.centroid(feature);
+        if (!Number.isNaN(cent[0]) && !Number.isNaN(cent[1])) {
+          const meta = resolveStateMetadata(originalName, entry.n);
+          list.push({
+            name: meta.name,
+            capital: meta.capital,
+            x: Math.round(cent[0]),
+            y: Math.round(cent[1]),
+          });
+        }
+      }
+    } else {
+      const realDefs = REAL_COUNTRY_STATES[originalName];
+      if (realDefs && realDefs.length > 0) {
+        for (const def of realDefs) {
+          if (!def.anchors || def.anchors.length === 0) continue;
+          const p = this.projection(def.anchors[0]);
+          if (p && !Number.isNaN(p[0]) && !Number.isNaN(p[1])) {
+            list.push({
+              name: def.name,
+              capital: def.capital,
+              x: Math.round(p[0]),
+              y: Math.round(p[1]),
+            });
+          }
+        }
+      }
+    }
+
+    this.cachedRegionCapitals.set(originalName, list);
+    return list;
+  }
+
+  private relocateLostCapital(
+    c: Country,
+    states: StateTerritory[]
+  ): { countryId: string; countryName: string; oldCapital: string; newCapital: string } | null {
+    const oldCapital = c.capital;
+    const numId = c.numericId;
+    const minX = Math.max(0, this.countryMinX[numId]);
+    const maxX = Math.min(this.width - 1, this.countryMaxX[numId]);
+    const minY = Math.max(0, this.countryMinY[numId]);
+    const maxY = Math.min(this.height - 1, this.countryMaxY[numId]);
+
+    // 1. Prefer the largest surviving initialized StateTerritory belonging to this country
+    const countryStates = states.filter((s) => s.countryId === c.id);
+    if (countryStates.length > 0 && minX <= maxX && minY <= maxY) {
+      const stateCounts = new Map<number, number>();
+      const validIds = new Set(countryStates.map((s) => s.numericId));
+      const w = this.width;
+      for (let y = minY; y <= maxY; y++) {
+        const row = y * w;
+        for (let x = minX; x <= maxX; x++) {
+          const idx = row + x;
+          if (this.owner[idx] === numId && this.terrain[idx] === TERRAIN_LAND) {
+            const sid = this.stateOwner[idx];
+            if (sid > 0 && validIds.has(sid)) {
+              stateCounts.set(sid, (stateCounts.get(sid) || 0) + 1);
+            }
+          }
+        }
+      }
+
+      let bestState: StateTerritory | null = null;
+      let bestCount = 0;
+      for (const st of countryStates) {
+        const sc = stateCounts.get(st.numericId) || 0;
+        // Prefer another state if old capital matched a lost state, or largest surviving state
+        if (sc > bestCount) {
+          bestCount = sc;
+          bestState = st;
+        }
+      }
+
+      if (bestState && bestCount > 0) {
+        const core = this.findCoreInteriorPoint(numId, bestState.numericId);
+        const pt = core || { x: c.centerX, y: c.centerY };
+        const nextCap = bestState.capitalCity || bestState.name;
+        c.capital = nextCap;
+        c.capitalX = pt.x;
+        c.capitalY = pt.y;
+        return nextCap !== oldCapital
+          ? { countryId: c.id, countryName: c.name, oldCapital, newCapital: nextCap }
+          : null;
+      }
+    }
+
+    // 2. Fallback: Check real-world regional capitals (Admin-1 / GeoSeeds) whose territory survives
+    if (!c.isCustom) {
+      const regions = this.getRegionalCapitalsForCountry(c.originalName);
+      let bestRegion: { name: string; capital: string; x: number; y: number } | null = null;
+      let bestDistSq = Infinity;
+      for (const reg of regions) {
+        if (!this.isNearOwned(reg.x, reg.y, numId, 2)) continue;
+        // Prefer regions closest to the surviving landmass core (and prefer distinct capital name)
+        const d2 = (reg.x - c.centerX) ** 2 + (reg.y - c.centerY) ** 2;
+        const penalty = reg.capital.toLowerCase() === oldCapital.toLowerCase() ? 100000 : 0;
+        if (d2 + penalty < bestDistSq) {
+          bestDistSq = d2 + penalty;
+          bestRegion = reg;
+        }
+      }
+      if (bestRegion) {
+        c.capital = bestRegion.capital;
+        c.capitalX = bestRegion.x;
+        c.capitalY = bestRegion.y;
+        return bestRegion.capital !== oldCapital
+          ? {
+              countryId: c.id,
+              countryName: c.name,
+              oldCapital,
+              newCapital: bestRegion.capital,
+            }
+          : null;
+      }
+    }
+
+    // 3. Final fallback: snap capital coordinates squarely onto the surviving territory core
+    c.capitalX = c.centerX;
+    c.capitalY = c.centerY;
+    return null;
+  }
+
+  public recalculateTerritoryCounts(
+    countries: Country[],
+    states: StateTerritory[] = []
+  ): { countryId: string; countryName: string; oldCapital: string; newCapital: string }[] {
     const counts = new Int32Array(65536);
-    const sumX = new Float64Array(65536);
-    const sumY = new Float64Array(65536);
 
     this.countryMinX.fill(this.width);
     this.countryMaxX.fill(-1);
@@ -768,8 +1105,6 @@ export class WorldMapEngine {
         counts[id]++;
         const x = i % w;
         const y = (i - x) / w;
-        sumX[id] += x;
-        sumY[id] += y;
         if (x < this.countryMinX[id]) this.countryMinX[id] = x;
         if (x > this.countryMaxX[id]) this.countryMaxX[id] = x;
         if (y < this.countryMinY[id]) this.countryMinY[id] = y;
@@ -777,17 +1112,54 @@ export class WorldMapEngine {
       }
     }
 
+    const capitalRelocations: {
+      countryId: string;
+      countryName: string;
+      oldCapital: string;
+      newCapital: string;
+    }[] = [];
+
     countries.forEach((c) => {
+      const prevCount = c.territoryCells;
       const count = counts[c.numericId] || 0;
       c.territoryCells = count;
-      // Preserve authentic GeoJSON mainland centroid for real countries unless custom/redefined!
-      if (count > 0 && (c.isCustom || c.hasCustomTerritory)) {
-        c.centerX = Math.round(sumX[c.numericId] / count);
-        c.centerY = Math.round(sumY[c.numericId] / count);
-        c.normX = c.centerX / this.width;
-        c.normY = c.centerY / this.height;
+
+      if (count > 0) {
+        const centerOwned = this.isNearOwned(c.centerX, c.centerY, c.numericId, 1);
+        if (
+          c.isCustom ||
+          c.hasCustomTerritory ||
+          !centerOwned ||
+          (prevCount > 0 && count !== prevCount)
+        ) {
+          const core = this.findCoreInteriorPoint(c.numericId);
+          if (core) {
+            c.centerX = core.x;
+            c.centerY = core.y;
+            c.normX = core.x / this.width;
+            c.normY = core.y / this.height;
+          }
+        }
+
+        const capRadius = prevCount === 0 ? 3 : 0;
+        const capOwned =
+          c.capitalX !== undefined &&
+          c.capitalY !== undefined &&
+          this.isNearOwned(c.capitalX, c.capitalY, c.numericId, capRadius);
+
+        if (!capOwned) {
+          if (prevCount === 0) {
+            c.capitalX = c.centerX;
+            c.capitalY = c.centerY;
+          } else {
+            const reloc = this.relocateLostCapital(c, states);
+            if (reloc) capitalRelocations.push(reloc);
+          }
+        }
       }
     });
+
+    return capitalRelocations;
   }
 
   /**
@@ -847,11 +1219,12 @@ export class WorldMapEngine {
 
         admin1List.forEach((entry, k) => {
           const numId = startingNumericId + k;
-          const r = ((numId * 73 + 41) % 210) + 35;
-          const g = ((numId * 137 + 83) % 210) + 35;
-          const b = ((numId * 193 + 19) % 210) + 35;
-          const rgbKey = (r << 16) | (g << 8) | b;
-          rgbToStateId.set(rgbKey, numId);
+          // 24-bit collision-free RGB encoding (offset by 0x101010 to avoid black background)
+          const enc = 0x101010 + numId;
+          const r = (enc >> 16) & 255;
+          const g = (enc >> 8) & 255;
+          const b = enc & 255;
+          rgbToStateId.set(enc, numId);
 
           const feature: Feature<MultiPolygon> = {
             type: 'Feature',
@@ -873,13 +1246,15 @@ export class WorldMapEngine {
           const cy = !Number.isNaN(cent[1]) ? Math.round(cent[1]) : Math.round((minY + maxY) / 2);
           stateCentroids.set(numId, { x: cx, y: cy });
 
+          const stateColor = STATE_PALETTE[k % STATE_PALETTE.length];
           newStates.push({
             id: `STATE_${country.id}_${numId}`,
             numericId: numId,
             countryId: country.id,
             name: meta.name,
             capitalCity: meta.capital,
-            color: STATE_PALETTE[k % STATE_PALETTE.length],
+            color: stateColor,
+            flag: getRealStateFlag(country.originalName, meta.name, stateColor),
             centerX: cx,
             centerY: cy,
             territoryCells: 0,
@@ -895,8 +1270,20 @@ export class WorldMapEngine {
           const lx = cell.x - minX;
           const ly = cell.y - minY;
           const p = (ly * boxW + lx) * 4;
-          const key = (raw[p] << 16) | (raw[p + 1] << 8) | raw[p + 2];
-          const sid = rgbToStateId.get(key);
+          const rr = raw[p];
+          const gg = raw[p + 1];
+          const bb = raw[p + 2];
+          const key = (rr << 16) | (gg << 8) | bb;
+          let sid = rgbToStateId.get(key);
+
+          // Fallback for slight canvas anti-aliasing on polygon edges
+          if (sid === undefined && rr + gg + bb > 30) {
+            const candidate = key - 0x101010;
+            if (candidate >= startingNumericId && candidate < startingNumericId + admin1List.length) {
+              sid = candidate;
+            }
+          }
+
           if (sid !== undefined) {
             this.stateOwner[cell.idx] = sid;
           } else {
@@ -906,11 +1293,12 @@ export class WorldMapEngine {
         }
 
         // Fill 1-2px coastal edge mismatches from adjacent assigned state pixels
-        for (let pass = 0; pass < 4 && unassigned.length > 0; pass++) {
+        for (let pass = 0; pass < 5 && unassigned.length > 0; pass++) {
           for (let i = unassigned.length - 1; i >= 0; i--) {
             const c = unassigned[i];
             let found = 0;
-            const x = c.x, y = c.y;
+            const x = c.x,
+              y = c.y;
             if (x > 0 && this.owner[c.idx - 1] === country.numericId && this.stateOwner[c.idx - 1] > 0) {
               found = this.stateOwner[c.idx - 1];
             } else if (x < this.width - 1 && this.owner[c.idx + 1] === country.numericId && this.stateOwner[c.idx + 1] > 0) {
@@ -944,7 +1332,7 @@ export class WorldMapEngine {
           }
         }
 
-        // Ensure tiny states like Distrito Federal or Rhode Island get at least 1 pixel at their centroid
+        // Ensure tiny states like Distrito Federal, Bremen or Rhode Island get visible centroid pixels
         this.recalculateStateCounts(newStates);
         for (const st of newStates) {
           if (st.territoryCells === 0) {
@@ -960,6 +1348,12 @@ export class WorldMapEngine {
               }
             }
             this.stateOwner[closest.idx] = st.numericId;
+            if (closest.x + 1 < this.width) {
+              const rightIdx = closest.idx + 1;
+              if (this.owner[rightIdx] === country.numericId && this.terrain[rightIdx] === TERRAIN_LAND) {
+                this.stateOwner[rightIdx] = st.numericId;
+              }
+            }
           }
         }
 
@@ -991,13 +1385,15 @@ export class WorldMapEngine {
 
         const numId = startingNumericId + k;
         const w = def.weight ?? 1.0;
+        const stateColor = STATE_PALETTE[k % STATE_PALETTE.length];
         const st: StateTerritory = {
           id: `STATE_${country.id}_${numId}`,
           numericId: numId,
           countryId: country.id,
           name: def.name,
           capitalCity: def.capital,
-          color: STATE_PALETTE[k % STATE_PALETTE.length],
+          color: stateColor,
+          flag: getRealStateFlag(country.originalName, def.name, stateColor),
           centerX: Math.round(pts[0].x),
           centerY: Math.round(pts[0].y),
           territoryCells: 0,
@@ -1050,13 +1446,15 @@ export class WorldMapEngine {
 
     regions.forEach((reg, k) => {
       const numId = startingNumericId + k;
+      const stateColor = STATE_PALETTE[k % STATE_PALETTE.length];
       newStates.push({
         id: `STATE_${country.id}_${numId}`,
         numericId: numId,
         countryId: country.id,
         name: reg.name,
         capitalCity: reg.cap,
-        color: STATE_PALETTE[k % STATE_PALETTE.length],
+        color: stateColor,
+        flag: getRealStateFlag(country.originalName, reg.name, stateColor),
         centerX: Math.round(reg.ax),
         centerY: Math.round(reg.ay),
         territoryCells: 0,
@@ -1194,7 +1592,7 @@ export class WorldMapEngine {
     country.hasCustomTerritory = true;
 
     if (changed) {
-      this.recalculateTerritoryCounts(countries);
+      this.recalculateTerritoryCounts(countries, states);
       this.refreshRegion(minX, minY, maxX, maxY, countries, empires, states);
     }
   }
@@ -1253,8 +1651,10 @@ export class WorldMapEngine {
             this.terrain[idx] = TERRAIN_LAND;
           }
           if (this.terrain[idx] === TERRAIN_LAND) {
+            if (this.owner[idx] !== targetNumericId) {
+              this.stateOwner[idx] = 0;
+            }
             this.owner[idx] = targetNumericId;
-            if (targetNumericId === 0) this.stateOwner[idx] = 0;
           }
         }
       }
@@ -1537,15 +1937,183 @@ export class WorldMapEngine {
       name: defeated.name,
       capitalCity: defeated.capital,
       color: STATE_PALETTE[states.length % STATE_PALETTE.length],
+      flag: defeated.flag,
       centerX: count > 0 ? Math.round(sumX / count) : defeated.centerX,
       centerY: count > 0 ? Math.round(sumY / count) : defeated.centerY,
       territoryCells: count,
     };
 
     const updatedStates = [...states, newState];
-    this.recalculateTerritoryCounts(countries);
+    this.recalculateTerritoryCounts(countries, updatedStates);
     this.refreshFullBuffer(countries, empires, updatedStates);
     return newState;
+  }
+
+  /**
+   * Freehand Scissors inside a Country (States mode) to carve out a brand-new State!
+   */
+  public cutStateWithFreehandPath(
+    path: { x: number; y: number }[],
+    country: Country,
+    nextStateNumericId: number,
+    countries: Country[],
+    empires: Empire[],
+    states: StateTerritory[]
+  ): StateCutResult | null {
+    if (path.length < 4) return null;
+
+    const first = path[0];
+    const last = path[path.length - 1];
+    const distEnds = Math.hypot(first.x - last.x, first.y - last.y);
+    const isClosedLoop = distEnds < 45 || (path.length > 18 && distEnds < 75);
+
+    let minX = Infinity,
+      maxX = -Infinity,
+      minY = Infinity,
+      maxY = -Infinity;
+    for (const p of path) {
+      minX = Math.min(minX, p.x);
+      maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y);
+      maxY = Math.max(maxY, p.y);
+    }
+
+    const padding = isClosedLoop ? 4 : 32;
+    const bMinX = Math.max(0, Math.floor(minX - padding));
+    const bMaxX = Math.min(this.width - 1, Math.ceil(maxX + padding));
+    const bMinY = Math.max(0, Math.floor(minY - padding));
+    const bMaxY = Math.min(this.height - 1, Math.ceil(maxY + padding));
+
+    let cellCount = 0;
+    let sumX = 0;
+    let sumY = 0;
+    const sourceStateIds = new Set<number>();
+
+    if (isClosedLoop) {
+      for (let y = bMinY; y <= bMaxY; y++) {
+        for (let x = bMinX; x <= bMaxX; x++) {
+          const idx = y * this.width + x;
+          if (this.terrain[idx] === TERRAIN_LAND && this.owner[idx] === country.numericId) {
+            if (this.isPointInsidePolygon(x, y, path)) {
+              if (this.stateOwner[idx] > 0) sourceStateIds.add(this.stateOwner[idx]);
+              this.stateOwner[idx] = nextStateNumericId;
+              cellCount++;
+              sumX += x;
+              sumY += y;
+            }
+          }
+        }
+      }
+    } else {
+      const step = Math.max(1, Math.floor(path.length / 40));
+      const simp: { x: number; y: number }[] = [];
+      for (let i = 0; i < path.length; i += step) simp.push(path[i]);
+      if (simp[simp.length - 1] !== last) simp.push(last);
+
+      for (let y = bMinY; y <= bMaxY; y++) {
+        for (let x = bMinX; x <= bMaxX; x++) {
+          const idx = y * this.width + x;
+          if (this.terrain[idx] === TERRAIN_LAND && this.owner[idx] === country.numericId) {
+            let minSegmentDist = Infinity;
+            let closestCross = 0;
+
+            for (let i = 0; i < simp.length - 1; i++) {
+              const p1 = simp[i];
+              const p2 = simp[i + 1];
+              const segDx = p2.x - p1.x;
+              const segDy = p2.y - p1.y;
+              const segLenSq = segDx * segDx + segDy * segDy;
+              if (segLenSq === 0) continue;
+
+              const t = Math.max(
+                0,
+                Math.min(1, ((x - p1.x) * segDx + (y - p1.y) * segDy) / segLenSq)
+              );
+              const projX = p1.x + t * segDx;
+              const projY = p1.y + t * segDy;
+              const dist = Math.hypot(x - projX, y - projY);
+
+              if (dist < minSegmentDist) {
+                minSegmentDist = dist;
+                closestCross = (x - p1.x) * segDy - (y - p1.y) * segDx;
+              }
+            }
+
+            if (closestCross > 0 && minSegmentDist <= padding) {
+              if (this.stateOwner[idx] > 0) sourceStateIds.add(this.stateOwner[idx]);
+              this.stateOwner[idx] = nextStateNumericId;
+              cellCount++;
+              sumX += x;
+              sumY += y;
+            }
+          }
+        }
+      }
+    }
+
+    if (cellCount < 4) return null;
+
+    this.recalculateStateCounts(states);
+    this.refreshRegion(bMinX, bMinY, bMaxX, bMaxY, countries, empires, states);
+
+    const sourceStateNames: string[] = [];
+    sourceStateIds.forEach((sid) => {
+      const s = states.find((item) => item.numericId === sid);
+      if (s) sourceStateNames.push(s.name);
+    });
+
+    return {
+      newStateNumericId: nextStateNumericId,
+      countryId: country.id,
+      cellCount,
+      sourceStateNames,
+      centroid: {
+        x: Math.round(sumX / cellCount),
+        y: Math.round(sumY / cellCount),
+      },
+    };
+  }
+
+  /**
+   * Transfers a single State from donorCountry to recipientCountry (for Donating or Selling a State).
+   */
+  public transferStateToCountry(
+    donor: Country,
+    state: StateTerritory,
+    recipient: Country,
+    countries: Country[],
+    empires: Empire[],
+    states: StateTerritory[]
+  ): { transferredCells: number; centroid: { x: number; y: number } } {
+    let sumX = 0;
+    let sumY = 0;
+    let count = 0;
+
+    for (let y = 0; y < this.height; y++) {
+      for (let x = 0; x < this.width; x++) {
+        const idx = y * this.width + x;
+        if (this.owner[idx] === donor.numericId && this.stateOwner[idx] === state.numericId) {
+          this.owner[idx] = recipient.numericId;
+          this.stateOwner[idx] = state.numericId;
+          sumX += x;
+          sumY += y;
+          count++;
+        }
+      }
+    }
+
+    state.countryId = recipient.id;
+    this.recalculateTerritoryCounts(countries, states);
+    this.recalculateStateCounts(states);
+    this.refreshFullBuffer(countries, empires, states);
+
+    return {
+      transferredCells: count,
+      centroid: {
+        x: count > 0 ? Math.round(sumX / count) : state.centerX,
+        y: count > 0 ? Math.round(sumY / count) : state.centerY,
+      },
+    };
   }
 
   /**
@@ -1577,7 +2145,7 @@ export class WorldMapEngine {
     }
 
     const remainingStates = states.filter((s) => s.id !== state.id);
-    this.recalculateTerritoryCounts(countries);
+    this.recalculateTerritoryCounts(countries, remainingStates);
     this.recalculateStateCounts(remainingStates);
     this.refreshFullBuffer(countries, empires, remainingStates);
 
@@ -1619,7 +2187,7 @@ export class WorldMapEngine {
       }
     }
 
-    this.recalculateTerritoryCounts(countries);
+    this.recalculateTerritoryCounts(countries, states);
     this.recalculateStateCounts(states);
     this.refreshFullBuffer(countries, empires, states);
 
@@ -1729,7 +2297,7 @@ export class WorldMapEngine {
       }
     }
 
-    this.recalculateTerritoryCounts(countries);
+    this.recalculateTerritoryCounts(countries, states);
     this.refreshFullBuffer(countries, empires, states);
   }
 
@@ -1812,6 +2380,20 @@ export class WorldMapEngine {
 
       const attSet = new Set(attackerNums);
       const defSet = new Set(defenderNums);
+      const targetState = war.targetState;
+      const targetParentNum = targetState
+        ? countryMap.get(targetState.parentCountryId)?.numericId ?? -1
+        : -1;
+      const targetStateNum = targetState ? targetState.stateNumericId : -1;
+
+      const isValidDefenderCell = (idx: number): boolean => {
+        const o = this.owner[idx];
+        if (!defSet.has(o)) return false;
+        if (targetState && o === targetParentNum) {
+          return this.stateOwner[idx] === targetStateNum;
+        }
+        return true;
+      };
 
       let attMinX = this.width, attMaxX = 0, attMinY = this.height, attMaxY = 0;
       for (const n of attackerNums) {
@@ -1858,13 +2440,13 @@ export class WorldMapEngine {
             const nDown = idx + w;
             const nUp = idx - w;
 
-            if (defSet.has(this.owner[nRight])) {
+            if (isValidDefenderCell(nRight)) {
               frontline.push({ attIdx: idx, attX: x, attY: y, attOwner: o, defIdx: nRight, defX: x + 1, defY: y, defOwner: this.owner[nRight] });
-            } else if (defSet.has(this.owner[nLeft])) {
+            } else if (isValidDefenderCell(nLeft)) {
               frontline.push({ attIdx: idx, attX: x, attY: y, attOwner: o, defIdx: nLeft, defX: x - 1, defY: y, defOwner: this.owner[nLeft] });
-            } else if (defSet.has(this.owner[nDown])) {
+            } else if (isValidDefenderCell(nDown)) {
               frontline.push({ attIdx: idx, attX: x, attY: y, attOwner: o, defIdx: nDown, defX: x, defY: y + 1, defOwner: this.owner[nDown] });
-            } else if (defSet.has(this.owner[nUp])) {
+            } else if (isValidDefenderCell(nUp)) {
               frontline.push({ attIdx: idx, attX: x, attY: y, attOwner: o, defIdx: nUp, defX: x, defY: y - 1, defOwner: this.owner[nUp] });
             }
           }
@@ -1893,7 +2475,7 @@ export class WorldMapEngine {
             war.casualties.defenders += Math.floor(Math.random() * 20) + 5;
           } else {
             this.owner[pair.attIdx] = pair.defOwner;
-            this.stateOwner[pair.attIdx] = 0;
+            this.stateOwner[pair.attIdx] = targetState && pair.defOwner === targetParentNum ? targetStateNum : 0;
             war.casualties.attackers += Math.floor(Math.random() * 20) + 5;
           }
 
@@ -1943,25 +2525,33 @@ export class WorldMapEngine {
             });
           }
         }
-      } else if (this.warTickCounter % 5 === 0) {
-        // Overseas / separated war: launch fast amphibious landing beachhead!
+      } else if (this.warTickCounter % 4 === 0) {
+        // Overseas / separated war (or targeted distant state): launch fast amphibious/expeditionary landing!
         const primaryAtt = attackerNums[0];
-        const primaryDef = defenderNums[Math.floor(Math.random() * defenderNums.length)];
+        const primaryDef = targetState && targetParentNum > 0
+          ? targetParentNum
+          : defenderNums[Math.floor(Math.random() * defenderNums.length)];
         const dMinX = Math.max(1, this.countryMinX[primaryDef]);
         const dMaxX = Math.min(this.width - 2, this.countryMaxX[primaryDef]);
         const dMinY = Math.max(1, this.countryMinY[primaryDef]);
         const dMaxY = Math.min(this.height - 2, this.countryMaxY[primaryDef]);
 
         if (dMinX <= dMaxX && dMinY <= dMaxY) {
-          for (let attempt = 0; attempt < 60; attempt++) {
+          for (let attempt = 0; attempt < 95; attempt++) {
             const rx = dMinX + Math.floor(Math.random() * (dMaxX - dMinX + 1));
             const ry = dMinY + Math.floor(Math.random() * (dMaxY - dMinY + 1));
             const idx = ry * this.width + rx;
-            if (this.owner[idx] === primaryDef) {
+            const hitDef =
+              this.owner[idx] === primaryDef &&
+              (!targetState || this.stateOwner[idx] === targetStateNum);
+            if (hitDef) {
               for (let dy = -1; dy <= 1; dy++) {
                 for (let dx = -1; dx <= 1; dx++) {
                   const nidx = (ry + dy) * this.width + (rx + dx);
-                  if (this.owner[nidx] === primaryDef) {
+                  const nHit =
+                    this.owner[nidx] === primaryDef &&
+                    (!targetState || this.stateOwner[nidx] === targetStateNum);
+                  if (nHit) {
                     this.owner[nidx] = primaryAtt;
                     this.stateOwner[nidx] = 0;
                   }
@@ -1980,6 +2570,9 @@ export class WorldMapEngine {
     }
 
     if (anyChanged) {
+      if (wars.some((w) => w.targetState)) {
+        this.recalculateStateCounts(states);
+      }
       this.refreshRegion(dirtyMinX, dirtyMinY, dirtyMaxX, dirtyMaxY, countries, empires, states);
     }
   }
@@ -2086,6 +2679,29 @@ export class WorldMapEngine {
             maxLife: 12 + Math.random() * 8,
           });
         }
+      } else {
+        // Non-adjacent states inside the country: establish an expeditionary beachhead inside defender state!
+        for (let attempt = 0; attempt < 80; attempt++) {
+          const rx = x0 + Math.floor(Math.random() * (x1 - x0 + 1));
+          const ry = y0 + Math.floor(Math.random() * (y1 - y0 + 1));
+          const idx = ry * w + rx;
+          if (this.owner[idx] === cNum && this.stateOwner[idx] === defState.numericId) {
+            for (let dy = -1; dy <= 1; dy++) {
+              for (let dx = -1; dx <= 1; dx++) {
+                const nidx = (ry + dy) * w + (rx + dx);
+                if (this.owner[nidx] === cNum && this.stateOwner[nidx] === defState.numericId) {
+                  this.stateOwner[nidx] = attState.numericId;
+                }
+              }
+            }
+            anyChanged = true;
+            dirtyMinX = Math.min(dirtyMinX, rx - 2);
+            dirtyMaxX = Math.max(dirtyMaxX, rx + 2);
+            dirtyMinY = Math.min(dirtyMinY, ry - 2);
+            dirtyMaxY = Math.max(dirtyMaxY, ry + 2);
+            break;
+          }
+        }
       }
     }
 
@@ -2093,5 +2709,447 @@ export class WorldMapEngine {
       this.recalculateStateCounts(states);
       this.refreshRegion(dirtyMinX, dirtyMinY, dirtyMaxX, dirtyMaxY, countries, empires, states);
     }
+  }
+
+  /**
+   * AUTOMATIC COLONIZATION OF EMPTY / NEUTRAL LAND:
+   * Surrounding countries automatically expand into adjacent neutral land (`terrain === TERRAIN_LAND && owner === 0`).
+   * Isolated newly-emerged islands in the sea receive coastal beachheads from closest maritime nations!
+   */
+  public expandIntoNeutralLandTick(
+    countries: Country[],
+    empires: Empire[],
+    states: StateTerritory[] = []
+  ): { changed: boolean; gains: { countryId: string; cells: number }[] } {
+    const w = this.width;
+    const h = this.height;
+    const total = w * h;
+
+    const neutralIndices: number[] = [];
+    for (let i = 0; i < total; i++) {
+      if (this.terrain[i] === TERRAIN_LAND && this.owner[i] === 0) {
+        neutralIndices.push(i);
+      }
+    }
+    if (neutralIndices.length === 0) return { changed: false, gains: [] };
+
+    const activeCountries = countries.filter((c) => c.territoryCells > 0);
+    if (activeCountries.length === 0) return { changed: false, gains: [] };
+
+    const numToCountry = new Map<number, Country>();
+    activeCountries.forEach((c) => numToCountry.set(c.numericId, c));
+
+    const claims: { idx: number; newOwner: number; x: number; y: number }[] = [];
+    const offsets = [-1, 1, -w, w, -w - 1, -w + 1, w - 1, w + 1];
+
+    for (const idx of neutralIndices) {
+      const x = idx % w;
+      const y = (idx - x) / w;
+      if (x <= 1 || x >= w - 2 || y <= 1 || y >= h - 2) continue;
+
+      let candidateOwner = 0;
+      const startOff = Math.floor(Math.random() * offsets.length);
+      for (let k = 0; k < offsets.length; k++) {
+        const nIdx = idx + offsets[(startOff + k) % offsets.length];
+        const no = this.owner[nIdx];
+        if (no > 0 && numToCountry.has(no)) {
+          candidateOwner = no;
+          break;
+        }
+      }
+
+      if (candidateOwner > 0 && Math.random() < 0.72) {
+        claims.push({ idx, newOwner: candidateOwner, x, y });
+      }
+    }
+
+    // If neutral land exists with NO land-bordering country (e.g. a newly emerged island in the sea),
+    // closest maritime nations establish coastal beachheads!
+    if (claims.length === 0 && neutralIndices.length > 0) {
+      const sampleCount = Math.min(4, Math.max(1, Math.ceil(neutralIndices.length / 450)));
+      const seededCountries = new Set<number>();
+
+      for (let s = 0; s < sampleCount; s++) {
+        const randIdx = neutralIndices[Math.floor(Math.random() * neutralIndices.length)];
+        const sx = randIdx % w;
+        const sy = (randIdx - sx) / w;
+
+        // Find closest active countries by center distance
+        const ranked = activeCountries
+          .map((c) => ({
+            c,
+            dist: (c.centerX - sx) ** 2 + (c.centerY - sy) ** 2,
+          }))
+          .sort((a, b) => a.dist - b.dist);
+
+        const picker = ranked.find((r) => !seededCountries.has(r.c.numericId)) || ranked[0];
+        if (!picker) continue;
+        seededCountries.add(picker.c.numericId);
+
+        // Find neutral pixel closest to that maritime country so landing hits the facing shore
+        let bestNeutral = randIdx;
+        let bestDist = Infinity;
+        const step = Math.max(1, Math.floor(neutralIndices.length / 180));
+        for (let k = 0; k < neutralIndices.length; k += step) {
+          const ni = neutralIndices[k];
+          const nx = ni % w;
+          const ny = (ni - nx) / w;
+          const d = (nx - picker.c.centerX) ** 2 + (ny - picker.c.centerY) ** 2;
+          if (d < bestDist) {
+            bestDist = d;
+            bestNeutral = ni;
+          }
+        }
+
+        const bx = bestNeutral % w;
+        const by = (bestNeutral - bx) / w;
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) {
+            const nx = bx + dx;
+            const ny = by + dy;
+            if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+              const bIdx = ny * w + nx;
+              if (this.terrain[bIdx] === TERRAIN_LAND && this.owner[bIdx] === 0) {
+                claims.push({ idx: bIdx, newOwner: picker.c.numericId, x: nx, y: ny });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (claims.length === 0) return { changed: false, gains: [] };
+
+    let minX = w,
+      minY = h,
+      maxX = 0,
+      maxY = 0;
+    const gainCounts = new Map<string, number>();
+
+    for (const cl of claims) {
+      if (this.owner[cl.idx] !== 0) continue;
+      this.owner[cl.idx] = cl.newOwner;
+      this.stateOwner[cl.idx] = 0;
+      if (cl.x < minX) minX = cl.x;
+      if (cl.x > maxX) maxX = cl.x;
+      if (cl.y < minY) minY = cl.y;
+      if (cl.y > maxY) maxY = cl.y;
+
+      const cObj = numToCountry.get(cl.newOwner);
+      if (cObj) {
+        gainCounts.set(cObj.id, (gainCounts.get(cObj.id) || 0) + 1);
+      }
+    }
+
+    this.recalculateTerritoryCounts(countries, states);
+    this.refreshRegion(minX, minY, maxX, maxY, countries, empires, states);
+
+    const gains: { countryId: string; cells: number }[] = [];
+    gainCounts.forEach((cells, countryId) => gains.push({ countryId, cells }));
+    return { changed: true, gains };
+  }
+
+  /**
+   * DYNAMIC GEOLOGICAL LAND EMERGENCE:
+   * Spawns a new natural island or giant landmass in the ocean (e.g. near Japan, Europe, Brazil or open ocean)
+   * with neutral land (`owner = 0`) that nearby nations can automatically colonize!
+   */
+  public spawnDynamicLandmass(
+    countries: Country[],
+    empires: Empire[],
+    states: StateTerritory[] = []
+  ): { x: number; y: number; cellsCreated: number; nearCountry?: Country } | null {
+    const w = this.width;
+    const h = this.height;
+    const active = countries.filter((c) => c.territoryCells > 20);
+    if (active.length === 0) return null;
+
+    let seedX = 0;
+    let seedY = 0;
+    let nearCountry: Country | undefined;
+    let foundSpot = false;
+
+    // 75% chance to spawn near a populated/coastal country (e.g. next to Japan, China, Brazil, etc.)
+    const tryNearCountry = Math.random() < 0.78;
+    const baseRadius = 15 + Math.floor(Math.random() * 14);
+
+    for (let attempt = 0; attempt < 45; attempt++) {
+      if (tryNearCountry) {
+        const anchor = active[Math.floor(Math.random() * active.length)];
+        const angle = Math.random() * Math.PI * 2;
+        const dist = baseRadius + 24 + Math.random() * 38;
+        const cx = Math.round(anchor.centerX + Math.cos(angle) * dist);
+        const cy = Math.round(anchor.centerY + Math.sin(angle) * dist);
+        if (cx > baseRadius + 15 && cx < w - baseRadius - 15 && cy > baseRadius + 25 && cy < h - baseRadius - 30) {
+          const idx = cy * w + cx;
+          if (this.terrain[idx] === TERRAIN_DEEP_WATER) {
+            seedX = cx;
+            seedY = cy;
+            nearCountry = anchor;
+            foundSpot = true;
+            break;
+          }
+        }
+      } else {
+        const cx = Math.round(80 + Math.random() * (w - 160));
+        const cy = Math.round(80 + Math.random() * (h - 170));
+        const idx = cy * w + cx;
+        if (this.terrain[idx] === TERRAIN_DEEP_WATER) {
+          seedX = cx;
+          seedY = cy;
+          foundSpot = true;
+          break;
+        }
+      }
+    }
+
+    if (!foundSpot) return null;
+
+    const phaseA = Math.random() * 6.28;
+    const phaseB = Math.random() * 6.28;
+    const aspectX = 0.8 + Math.random() * 0.6;
+    const aspectY = 0.8 + Math.random() * 0.6;
+    const haloR = baseRadius + 5;
+
+    const x0 = Math.max(0, Math.floor(seedX - haloR * aspectX - 4));
+    const x1 = Math.min(w - 1, Math.ceil(seedX + haloR * aspectX + 4));
+    const y0 = Math.max(0, Math.floor(seedY - haloR * aspectY - 4));
+    const y1 = Math.min(h - 1, Math.ceil(seedY + haloR * aspectY + 4));
+
+    let cellsCreated = 0;
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const idx = y * w + x;
+        // Never overwrite existing countries' land; emerge into ocean water
+        if (this.owner[idx] > 0 || this.terrain[idx] === TERRAIN_LAND) continue;
+
+        const dx = (x - seedX) / aspectX;
+        const dy = (y - seedY) / aspectY;
+        const angle = Math.atan2(dy, dx);
+        const shapeMod =
+          1 +
+          0.22 * Math.sin(angle * 3 + phaseA) +
+          0.14 * Math.cos(angle * 5 + phaseB);
+        const effR = baseRadius * shapeMod;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist <= effR) {
+          this.terrain[idx] = TERRAIN_LAND;
+          this.owner[idx] = 0;
+          this.stateOwner[idx] = 0;
+          cellsCreated++;
+        } else if (dist <= effR + 3 && this.terrain[idx] === TERRAIN_DEEP_WATER) {
+          this.terrain[idx] = TERRAIN_SHALLOW_WATER;
+        }
+      }
+    }
+
+    if (cellsCreated < 35) return null;
+
+    // Pick closest active country to anchor name in chronicles
+    if (!nearCountry) {
+      let bestD = Infinity;
+      for (const c of active) {
+        const d = (c.centerX - seedX) ** 2 + (c.centerY - seedY) ** 2;
+        if (d < bestD) {
+          bestD = d;
+          nearCountry = c;
+        }
+      }
+    }
+
+    this.refreshRegion(x0, y0, x1, y1, countries, empires, states);
+    return { x: seedX, y: seedY, cellsCreated, nearCountry };
+  }
+
+  /**
+   * DYNAMIC COASTAL / TECTONIC SUBMERGENCE:
+   * Rising seas or tectonic subsidence swallow an organic chunk of an existing country into the ocean.
+   */
+  public submergeDynamicRegion(
+    countries: Country[],
+    empires: Empire[],
+    states: StateTerritory[] = []
+  ): { country: Country; cellsLost: number } | null {
+    const w = this.width;
+    const h = this.height;
+    const candidates = countries.filter((c) => c.territoryCells > 55);
+    if (candidates.length === 0) return null;
+
+    const target = candidates[Math.floor(Math.random() * candidates.length)];
+    const minX = Math.max(2, this.countryMinX[target.numericId]);
+    const maxX = Math.min(w - 3, this.countryMaxX[target.numericId]);
+    const minY = Math.max(2, this.countryMinY[target.numericId]);
+    const maxY = Math.min(h - 3, this.countryMaxY[target.numericId]);
+    if (minX > maxX || minY > maxY) return null;
+
+    // Find a coastal or boundary land pixel belonging to target
+    let hitX = -1;
+    let hitY = -1;
+    for (let attempt = 0; attempt < 90; attempt++) {
+      const rx = minX + Math.floor(Math.random() * (maxX - minX + 1));
+      const ry = minY + Math.floor(Math.random() * (maxY - minY + 1));
+      const idx = ry * w + rx;
+      if (this.owner[idx] !== target.numericId || this.terrain[idx] !== TERRAIN_LAND) continue;
+
+      const nearSea =
+        this.terrain[idx + 1] !== TERRAIN_LAND ||
+        this.terrain[idx - 1] !== TERRAIN_LAND ||
+        this.terrain[idx + w] !== TERRAIN_LAND ||
+        this.terrain[idx - w] !== TERRAIN_LAND;
+
+      if (nearSea || attempt > 65) {
+        hitX = rx;
+        hitY = ry;
+        break;
+      }
+    }
+
+    if (hitX < 0 || hitY < 0) return null;
+
+    const radius = Math.min(
+      14,
+      Math.max(7, Math.round(Math.sqrt(target.territoryCells) * 0.22))
+    );
+    const phaseA = Math.random() * 6.28;
+    const x0 = Math.max(1, Math.floor(hitX - radius - 4));
+    const x1 = Math.min(w - 2, Math.ceil(hitX + radius + 4));
+    const y0 = Math.max(1, Math.floor(hitY - radius - 4));
+    const y1 = Math.min(h - 2, Math.ceil(hitY + radius + 4));
+
+    let cellsLost = 0;
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - hitX;
+        const dy = y - hitY;
+        const angle = Math.atan2(dy, dx);
+        const effR = radius * (1 + 0.24 * Math.sin(angle * 4 + phaseA));
+        const dist = Math.hypot(dx, dy);
+        if (dist <= effR) {
+          const idx = y * w + x;
+          if (this.terrain[idx] === TERRAIN_LAND && this.owner[idx] === target.numericId) {
+            this.terrain[idx] = dist <= effR * 0.58 ? TERRAIN_DEEP_WATER : TERRAIN_SHALLOW_WATER;
+            this.owner[idx] = 0;
+            this.stateOwner[idx] = 0;
+            cellsLost++;
+          }
+        }
+      }
+    }
+
+    if (cellsLost === 0) return null;
+
+    this.recalculateTerritoryCounts(countries, states);
+    this.recalculateStateCounts(states);
+    this.refreshRegion(x0 - 2, y0 - 2, x1 + 2, y1 + 2, countries, empires, states);
+    return { country: target, cellsLost };
+  }
+
+  /**
+   * ECONOMIC TERRITORY PURCHASE:
+   * Transfers a contiguous border region (up to `targetCells`) from `seller` to `buyer`.
+   */
+  public buyBorderTerritory(
+    buyer: Country,
+    seller: Country,
+    targetCells: number,
+    countries: Country[],
+    empires: Empire[],
+    states: StateTerritory[] = []
+  ): { transferredCells: number } {
+    const w = this.width;
+    const h = this.height;
+    const bNum = buyer.numericId;
+    const sNum = seller.numericId;
+
+    const sMinX = Math.max(1, this.countryMinX[sNum]);
+    const sMaxX = Math.min(w - 2, this.countryMaxX[sNum]);
+    const sMinY = Math.max(1, this.countryMinY[sNum]);
+    const sMaxY = Math.min(h - 2, this.countryMaxY[sNum]);
+    if (sMinX > sMaxX || sMinY > sMaxY) return { transferredCells: 0 };
+
+    const seedQueue: number[] = [];
+    const visited = new Uint8Array(w * h);
+
+    // Prefer seller pixels directly bordering buyer
+    for (let y = sMinY; y <= sMaxY; y++) {
+      for (let x = sMinX; x <= sMaxX; x++) {
+        const idx = y * w + x;
+        if (this.owner[idx] !== sNum) continue;
+        if (
+          this.owner[idx + 1] === bNum ||
+          this.owner[idx - 1] === bNum ||
+          this.owner[idx + w] === bNum ||
+          this.owner[idx - w] === bNum
+        ) {
+          seedQueue.push(idx);
+          visited[idx] = 1;
+        }
+      }
+    }
+
+    // If non-adjacent (overseas purchase), pick seller pixel closest to buyer's center
+    if (seedQueue.length === 0) {
+      let bestIdx = -1;
+      let bestDist = Infinity;
+      for (let y = sMinY; y <= sMaxY; y++) {
+        for (let x = sMinX; x <= sMaxX; x++) {
+          const idx = y * w + x;
+          if (this.owner[idx] !== sNum) continue;
+          const d = (x - buyer.centerX) ** 2 + (y - buyer.centerY) ** 2;
+          if (d < bestDist) {
+            bestDist = d;
+            bestIdx = idx;
+          }
+        }
+      }
+      if (bestIdx >= 0) {
+        seedQueue.push(bestIdx);
+        visited[bestIdx] = 1;
+      }
+    }
+
+    if (seedQueue.length === 0) return { transferredCells: 0 };
+
+    // Leave at least 5 pixels if seller is small
+    const maxCap = Math.min(targetCells, Math.max(1, seller.territoryCells - 5));
+    let head = 0;
+    let transferred = 0;
+    let dirtyMinX = w,
+      dirtyMaxX = 0,
+      dirtyMinY = h,
+      dirtyMaxY = 0;
+
+    while (head < seedQueue.length && transferred < maxCap) {
+      const idx = seedQueue[head++];
+      if (this.owner[idx] !== sNum) continue;
+
+      this.owner[idx] = bNum;
+      this.stateOwner[idx] = 0;
+      transferred++;
+
+      const x = idx % w;
+      const y = (idx - x) / w;
+      if (x < dirtyMinX) dirtyMinX = x;
+      if (x > dirtyMaxX) dirtyMaxX = x;
+      if (y < dirtyMinY) dirtyMinY = y;
+      if (y > dirtyMaxY) dirtyMaxY = y;
+
+      const neighbors = [idx + 1, idx - 1, idx + w, idx - w];
+      for (const nIdx of neighbors) {
+        if (nIdx >= 0 && nIdx < w * h && !visited[nIdx] && this.owner[nIdx] === sNum) {
+          visited[nIdx] = 1;
+          seedQueue.push(nIdx);
+        }
+      }
+    }
+
+    if (transferred > 0) {
+      this.recalculateTerritoryCounts(countries, states);
+      this.recalculateStateCounts(states);
+      this.refreshRegion(dirtyMinX, dirtyMinY, dirtyMaxX, dirtyMaxY, countries, empires, states);
+    }
+
+    return { transferredCells: transferred };
   }
 }

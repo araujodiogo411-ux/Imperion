@@ -47,6 +47,7 @@ export interface StateTerritory {
   name: string;
   capitalCity: string;
   color: string;
+  flag?: FlagData;
   centerX: number;
   centerY: number;
   territoryCells: number;
@@ -98,6 +99,8 @@ export interface Country {
   techProgress: number;
   ideology: Ideology;
   empireId: string | null;
+  sovereignCountryId?: string | null;
+  sovereignCountryName?: string;
   allies: string[];
   enemies: string[];
   decrees: string[];
@@ -153,6 +156,12 @@ export interface War {
     defenders: number;
   };
   isWorldWar: boolean;
+  targetState?: {
+    stateId: string;
+    stateNumericId: number;
+    parentCountryId: string;
+    stateName: string;
+  };
   annexationGoal?: {
     aggressorId: string;
     targetId: string;

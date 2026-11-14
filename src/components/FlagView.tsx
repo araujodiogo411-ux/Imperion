@@ -41,6 +41,18 @@ export const FlagView: React.FC<FlagViewProps> = ({
     );
   }
 
+  if (flag.type === 'svg' && flag.value) {
+    const dataUri = `data:image/svg+xml;utf8,${encodeURIComponent(flag.value)}`;
+    return (
+      <img
+        src={dataUri}
+        alt="State Flag"
+        className={`object-cover rounded-[3px] border border-white/25 shadow-sm shrink-0 bg-slate-800 ${className}`}
+        style={{ width: `${width}px`, height: `${height}px` }}
+      />
+    );
+  }
+
   if (flag.type === 'custom' && flag.customProps) {
     const { layout, colors, emblem, emblemColor = '#ffffff' } = flag.customProps;
     const c0 = colors[0] || '#dc2626';

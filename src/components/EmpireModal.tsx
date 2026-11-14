@@ -4,6 +4,7 @@ import { FlagView } from './FlagView';
 import { FlagStudioModal } from './FlagStudioModal';
 import { Crown, Check, X, Shield, Flag, Trash2, Search } from 'lucide-react';
 import { sound } from '../utils/audio';
+import { normalizeSearch } from '../utils/text';
 
 interface EmpireModalProps {
   isOpen: boolean;
@@ -58,13 +59,13 @@ export const EmpireModal: React.FC<EmpireModalProps> = ({
   const [countrySearch, setCountrySearch] = useState('');
 
   const filteredCountries = useMemo(() => {
-    const q = countrySearch.trim().toLowerCase();
+    const q = normalizeSearch(countrySearch);
     const list = q
       ? countries.filter(
           (c) =>
-            c.name.toLowerCase().includes(q) ||
-            c.capital.toLowerCase().includes(q) ||
-            c.continent.toLowerCase().includes(q)
+            normalizeSearch(c.name).includes(q) ||
+            normalizeSearch(c.capital).includes(q) ||
+            normalizeSearch(c.continent).includes(q)
         )
       : countries;
     return list.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));

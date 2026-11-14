@@ -12,8 +12,10 @@ import {
   Search,
   X,
   Bot,
+  Map as MapIcon,
 } from 'lucide-react';
 import { sound } from '../utils/audio';
+import { normalizeSearch } from '../utils/text';
 
 interface TopBarProps {
   year: number;
@@ -21,6 +23,7 @@ interface TopBarProps {
   simSpeed: number;
   isPaused: boolean;
   showDayNight: boolean;
+  showAllStates: boolean;
   soundEnabled: boolean;
   aiAutonomy: boolean;
   activeWarsCount: number;
@@ -32,6 +35,7 @@ interface TopBarProps {
   onSetSpeed: (speed: number) => void;
   onStepDay: () => void;
   onToggleDayNight: () => void;
+  onToggleShowAllStates: () => void;
   onToggleSound: () => void;
   onToggleAiAutonomy: () => void;
   onOpenEventsLog: () => void;
@@ -43,6 +47,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   simSpeed,
   isPaused,
   showDayNight,
+  showAllStates,
   soundEnabled,
   aiAutonomy,
   activeWarsCount,
@@ -54,6 +59,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onSetSpeed,
   onStepDay,
   onToggleDayNight,
+  onToggleShowAllStates,
   onToggleSound,
   onToggleAiAutonomy,
   onOpenEventsLog,
@@ -62,23 +68,23 @@ export const TopBar: React.FC<TopBarProps> = ({
   const [query, setQuery] = useState('');
 
   const filteredCountries = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = normalizeSearch(query);
     const list = q
       ? countries.filter(
           (c) =>
-            c.name.toLowerCase().includes(q) ||
-            c.capital.toLowerCase().includes(q) ||
-            c.continent.toLowerCase().includes(q)
+            normalizeSearch(c.name).includes(q) ||
+            normalizeSearch(c.capital).includes(q) ||
+            normalizeSearch(c.continent).includes(q)
         )
       : countries;
     return list.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
   }, [countries, query]);
 
   return (
-    <header className="relative h-14 bg-slate-900 border-b border-slate-800 px-6 flex items-center justify-between gap-6 z-30 shrink-0">
+    <header className="relative h-14 bg-slate-900 border-b border-slate-800 px-2.5 sm:px-6 flex items-center justify-between gap-2 sm:gap-6 z-30 shrink-0">
       {/* Zone 1: Single Brand Wordmark */}
       <div className="flex items-center gap-2 whitespace-nowrap shrink-0">
-        <span className="font-cinzel text-base font-black tracking-wider text-amber-400">
+        <span className="font-cinzel text-sm sm:text-base font-black tracking-wider text-amber-400">
           IMPERIUM 2D
         </span>
       </div>
@@ -108,69 +114,23 @@ export const TopBar: React.FC<TopBarProps> = ({
       </nav>
 
       {/* Zone 3: Primary Action & Time Controls */}
-      <div className="flex items-center gap-2.5 shrink-0">
+      <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0 overflow-x-auto no-scrollbar sm:overflow-visible">
         {/* Global Country Search Button */}
-        <div className="relative">
-          <button
-            onClick={() => {
-              sound.playClick();
-              setSearchOpen((v) => !v);
-            }}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-colors ${
-              searchOpen
-                ? 'bg-amber-400 text-slate-950 border-amber-300'
-                : 'bg-slate-950 text-slate-300 border-slate-800 hover:text-white hover:border-slate-700'
-            }`}
-            title="Pesquisar qualquer país do mundo"
-          >
-            <Search className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Pesquisar País</span>
-          </button>
-
-          {searchOpen && (
-            <div className="absolute right-0 top-11 w-80 bg-slate-900/98 backdrop-blur-md border border-slate-700 rounded-xl shadow-2xl p-3 space-y-2 z-50">
-              <div className="flex items-center justify-between text-xs text-slate-400">
-                <span className="font-semibold text-amber-300">Pesquisar Nação ({countries.length})</span>
-                <button onClick={() => setSearchOpen(false)} className="hover:text-white">
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
-                <input
-                  type="text"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Nome, capital ou continente..."
-                  autoFocus
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white focus:outline-none focus:border-amber-400"
-                />
-              </div>
-              <div className="max-h-60 overflow-y-auto space-y-1 pr-1">
-                {filteredCountries.map((c) => (
-                  <button
-                    key={c.id}
-                    onClick={() => {
-                      sound.playClick();
-                      onSelectCountryFromSearch(c);
-                      setSearchOpen(false);
-                      setQuery('');
-                    }}
-                    className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-xs text-left hover:bg-slate-800 text-slate-200 transition-colors"
-                  >
-                    <FlagView flag={c.flag} width={22} height={15} />
-                    <div className="min-w-0 flex-1">
-                      <div className="font-medium truncate">{c.name}</div>
-                      <div className="text-[10px] text-slate-400 truncate">
-                        {c.capital} · {c.ideology}
-                      </div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+        <button
+          onClick={() => {
+            sound.playClick();
+            setSearchOpen((v) => !v);
+          }}
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-colors shrink-0 ${
+            searchOpen
+              ? 'bg-amber-400 text-slate-950 border-amber-300'
+              : 'bg-slate-950 text-slate-300 border-slate-800 hover:text-white hover:border-slate-700'
+          }`}
+          title="Pesquisar qualquer país do mundo"
+        >
+          <Search className="w-3.5 h-3.5" />
+          <span className="hidden sm:inline">Pesquisar País</span>
+        </button>
 
         {/* Time Speed Controls */}
         <div className="flex items-center bg-slate-950 p-1 rounded-lg border border-slate-800">
@@ -215,6 +175,23 @@ export const TopBar: React.FC<TopBarProps> = ({
             <FastForward className="w-3.5 h-3.5" />
           </button>
         </div>
+
+        {/* Map States Overlay Toggle */}
+        <button
+          onClick={() => {
+            sound.playClick();
+            onToggleShowAllStates();
+          }}
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-colors ${
+            showAllStates
+              ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 hover:bg-cyan-500/30'
+              : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
+          }`}
+          title="Mostrar ou ocultar todas as fronteiras e estados no mapa"
+        >
+          <MapIcon className="w-3.5 h-3.5" />
+          <span className="hidden xl:inline">Estados</span>
+        </button>
 
         {/* Day/Night Toggle */}
         <button
@@ -270,11 +247,57 @@ export const TopBar: React.FC<TopBarProps> = ({
             sound.playClick();
             onOpenEventsLog();
           }}
-          className="px-3 py-1.5 text-xs font-semibold text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors whitespace-nowrap"
+          className="px-2.5 sm:px-3 py-1.5 text-xs font-semibold text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors whitespace-nowrap shrink-0"
         >
-          Crônicas do Mundo
+          <span className="sm:hidden">Crônicas</span>
+          <span className="hidden sm:inline">Crônicas do Mundo</span>
         </button>
       </div>
+
+      {/* Global Country Search Popover (Outside scrollable strip so it never clips) */}
+      {searchOpen && (
+        <div className="fixed left-2 right-2 top-15 sm:absolute sm:left-auto sm:right-6 sm:top-13 sm:w-80 bg-slate-900/98 backdrop-blur-md border border-slate-700 rounded-xl shadow-2xl p-3 space-y-2 z-50">
+          <div className="flex items-center justify-between text-xs text-slate-400">
+            <span className="font-semibold text-amber-300">Pesquisar Nação ({countries.length})</span>
+            <button onClick={() => setSearchOpen(false)} className="hover:text-white">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Nome, capital ou continente..."
+              autoFocus
+              className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white focus:outline-none focus:border-amber-400"
+            />
+          </div>
+          <div className="max-h-60 overflow-y-auto space-y-1 pr-1">
+            {filteredCountries.map((c) => (
+              <button
+                key={c.id}
+                onClick={() => {
+                  sound.playClick();
+                  onSelectCountryFromSearch(c);
+                  setSearchOpen(false);
+                  setQuery('');
+                }}
+                className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-xs text-left hover:bg-slate-800 text-slate-200 transition-colors"
+              >
+                <FlagView flag={c.flag} width={22} height={15} />
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium truncate">{c.name}</div>
+                  <div className="text-[10px] text-slate-400 truncate">
+                    {c.capital} · {c.ideology}
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </header>
   );
 };

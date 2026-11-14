@@ -11,6 +11,7 @@ import {
   Waves,
 } from 'lucide-react';
 import { sound } from '../utils/audio';
+import { normalizeSearch } from '../utils/text';
 
 interface BrushPaletteProps {
   countries: Country[];
@@ -49,18 +50,18 @@ export const BrushPalette: React.FC<BrushPaletteProps> = ({
   const [showPicker, setShowPicker] = useState(false);
 
   const filteredCountries = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = normalizeSearch(search);
     const list = q
-      ? countries.filter((c) => c.name.toLowerCase().includes(q))
+      ? countries.filter((c) => normalizeSearch(c.name).includes(q))
       : countries;
     return list.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
   }, [countries, search]);
 
   return (
-    <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center gap-2 pointer-events-auto">
+    <div className="absolute bottom-3 sm:bottom-5 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center gap-2 pointer-events-auto max-w-[calc(100vw-0.75rem)]">
       {/* Country Quick-Selector Dropdown */}
       {showPicker && (
-        <div className="w-80 bg-slate-900/95 backdrop-blur-md border border-slate-700 rounded-xl shadow-2xl p-3 space-y-2">
+        <div className="w-[calc(100vw-1rem)] max-w-80 sm:w-80 bg-slate-900/95 backdrop-blur-md border border-slate-700 rounded-xl shadow-2xl p-3 space-y-2">
           <div className="relative">
             <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
             <input
@@ -101,7 +102,7 @@ export const BrushPalette: React.FC<BrushPaletteProps> = ({
       )}
 
       {/* Main Dock */}
-      <div className="bg-slate-900/95 backdrop-blur-md border border-slate-700/90 rounded-xl shadow-2xl px-3.5 py-2 flex items-center gap-3 text-xs flex-wrap justify-center">
+      <div className="bg-slate-900/95 backdrop-blur-md border border-slate-700/90 rounded-xl shadow-2xl px-2.5 sm:px-3.5 py-2 flex items-center gap-2 sm:gap-3 text-xs flex-wrap justify-center max-h-[38vh] overflow-y-auto sm:overflow-visible">
         {/* Selected Country Button */}
         <button
           onClick={() => {

@@ -1,15 +1,18 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Country, War, Continent, PastWarRecord } from '../types/game';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { Country, War, Continent, PastWarRecord, StateTerritory } from '../types/game';
 import { FlagView } from './FlagView';
-import { Swords, Flame, Skull, Check, X, Globe2, RotateCcw, Search } from 'lucide-react';
+import { Swords, Flame, Skull, Check, X, Globe2, RotateCcw, Search, Map as MapIcon } from 'lucide-react';
 import { sound } from '../utils/audio';
+import { normalizeSearch } from '../utils/text';
 
 interface WarModalProps {
   isOpen: boolean;
   onClose: () => void;
   countries: Country[];
+  states: StateTerritory[];
   activeWars: War[];
   pastWars: PastWarRecord[];
+  onEnsureStatesForCountry: (country: Country) => StateTerritory[];
   onDeclareWar: (newWar: War) => void;
   onSignPeace: (warId: string) => void;
   onReopenWar: (record: PastWarRecord) => void;
@@ -20,8 +23,10 @@ export const WarModal: React.FC<WarModalProps> = ({
   isOpen,
   onClose,
   countries,
+  states,
   activeWars,
   pastWars,
+  onEnsureStatesForCountry,
   onDeclareWar,
   onSignPeace,
   onReopenWar,
@@ -31,6 +36,9 @@ export const WarModal: React.FC<WarModalProps> = ({
     preselectedCountryId || countries[0]?.id || 'USA'
   );
   const [targetIds, setTargetIds] = useState<string[]>([]);
+  const [targetScope, setTargetScope] = useState<'country' | 'state'>('country');
+  const [targetStateId, setTargetStateId] = useState<string>('');
+  const [stateTargetSearch, setStateTargetSearch] = useState('');
   const [warName, setWarName] = useState('Grande Conflito Territorial');
 
   // Search states
@@ -38,58 +46,92 @@ export const WarModal: React.FC<WarModalProps> = ({
   const [showAggressorList, setShowAggressorList] = useState(false);
   const [targetSearch, setTargetSearch] = useState('');
   const [warSearch, setWarSearch] = useState('');
+  const wasOpenRef = useRef(false);
 
+  // Only reset search inputs when transitioning from closed -> open (not on background country updates!)
   useEffect(() => {
-    if (isOpen) {
-      if (preselectedCountryId && countries.some((c) => c.id === preselectedCountryId)) {
+    if (isOpen && !wasOpenRef.current) {
+      if (preselectedCountryId) {
         setAggressorId(preselectedCountryId);
         setTargetIds((prev) => prev.filter((id) => id !== preselectedCountryId));
       }
       setAggressorSearch('');
       setTargetSearch('');
       setWarSearch('');
+      setStateTargetSearch('');
+      setTargetScope('country');
+      setTargetStateId('');
       setShowAggressorList(false);
     }
-  }, [isOpen, preselectedCountryId, countries]);
+    wasOpenRef.current = isOpen;
+  }, [isOpen, preselectedCountryId]);
+
+  const singleTargetCountry = useMemo(() => {
+    if (targetIds.length !== 1) return null;
+    return countries.find((c) => c.id === targetIds[0]) || null;
+  }, [countries, targetIds]);
+
+  const singleTargetStates = useMemo(() => {
+    if (!singleTargetCountry) return [];
+    const q = normalizeSearch(stateTargetSearch);
+    const list = states.filter(
+      (s) => s.countryId === singleTargetCountry.id && s.territoryCells > 0
+    );
+    return (q ? list.filter((s) => normalizeSearch(s.name).includes(q)) : list)
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  }, [states, singleTargetCountry, stateTargetSearch]);
 
   const filteredAggressors = useMemo(() => {
-    const q = aggressorSearch.trim().toLowerCase();
+    const q = normalizeSearch(aggressorSearch);
     const list = q
       ? countries.filter(
           (c) =>
-            c.name.toLowerCase().includes(q) ||
-            c.capital.toLowerCase().includes(q) ||
-            c.continent.toLowerCase().includes(q)
+            normalizeSearch(c.name).includes(q) ||
+            normalizeSearch(c.capital).includes(q) ||
+            normalizeSearch(c.continent).includes(q)
         )
       : countries;
     return list.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
   }, [countries, aggressorSearch]);
 
   const filteredTargets = useMemo(() => {
-    const q = targetSearch.trim().toLowerCase();
-    const list = countries.filter((c) => c.id !== aggressorId);
+    const q = normalizeSearch(targetSearch);
+    const list = countries.filter((c) => c.id !== aggressorId && c.territoryCells > 0);
     const filtered = q
       ? list.filter(
           (c) =>
-            c.name.toLowerCase().includes(q) ||
-            c.capital.toLowerCase().includes(q) ||
-            c.continent.toLowerCase().includes(q)
+            normalizeSearch(c.name).includes(q) ||
+            normalizeSearch(c.capital).includes(q) ||
+            normalizeSearch(c.continent).includes(q)
         )
       : list;
     return filtered.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
   }, [countries, aggressorId, targetSearch]);
 
   const filteredActiveWars = useMemo(() => {
-    const q = warSearch.trim().toLowerCase();
+    const q = normalizeSearch(warSearch);
     if (!q) return activeWars;
-    return activeWars.filter((w) => w.name.toLowerCase().includes(q));
-  }, [activeWars, warSearch]);
+    return activeWars.filter((w) => {
+      if (normalizeSearch(w.name).includes(q)) return true;
+      return [...w.attackers, ...w.defenders].some((cid) => {
+        const c = countries.find((item) => item.id === cid);
+        return c ? normalizeSearch(c.name).includes(q) : false;
+      });
+    });
+  }, [activeWars, warSearch, countries]);
 
   const filteredPastWars = useMemo(() => {
-    const q = warSearch.trim().toLowerCase();
+    const q = normalizeSearch(warSearch);
     if (!q) return pastWars;
-    return pastWars.filter((pw) => pw.name.toLowerCase().includes(q));
-  }, [pastWars, warSearch]);
+    return pastWars.filter((pw) => {
+      if (normalizeSearch(pw.name).includes(q)) return true;
+      return [...pw.attackers, ...pw.defenders].some((cid) => {
+        const c = countries.find((item) => item.id === cid);
+        return c ? normalizeSearch(c.name).includes(q) : false;
+      });
+    });
+  }, [pastWars, warSearch, countries]);
 
   if (!isOpen) return null;
 
@@ -97,8 +139,15 @@ export const WarModal: React.FC<WarModalProps> = ({
     sound.playClick();
     if (targetIds.includes(id)) {
       setTargetIds(targetIds.filter((item) => item !== id));
+      setTargetScope('country');
+      setTargetStateId('');
     } else {
-      setTargetIds([...targetIds, id]);
+      const next = [...targetIds, id];
+      setTargetIds(next);
+      if (next.length !== 1) {
+        setTargetScope('country');
+        setTargetStateId('');
+      }
     }
   };
 
@@ -110,7 +159,25 @@ export const WarModal: React.FC<WarModalProps> = ({
 
     const merged = Array.from(new Set([...targetIds, ...continentCountryIds]));
     setTargetIds(merged);
+    if (merged.length !== 1) {
+      setTargetScope('country');
+      setTargetStateId('');
+    }
   };
+
+  const handleEnableStateTargeting = () => {
+    if (!singleTargetCountry) return;
+    sound.playClick();
+    const loadedStates = onEnsureStatesForCountry(singleTargetCountry);
+    setTargetScope('state');
+    const firstValid = loadedStates.find((s) => s.territoryCells > 0);
+    if (firstValid) setTargetStateId(firstValid.id);
+  };
+
+  const selectedTargetState =
+    targetScope === 'state' && singleTargetCountry
+      ? states.find((s) => s.id === targetStateId && s.countryId === singleTargetCountry.id) || null
+      : null;
 
   const handleDeclare = () => {
     if (targetIds.length === 0) return;
@@ -123,7 +190,9 @@ export const WarModal: React.FC<WarModalProps> = ({
       .filter(Boolean);
 
     const generatedName =
-      targetIds.length > 2
+      selectedTargetState && singleTargetCountry
+        ? `Guerra por ${selectedTargetState.name}: ${aggressorCountry?.name} vs ${singleTargetCountry.name}`
+        : targetIds.length > 2
         ? `Guerra Mundial: ${aggressorCountry?.name} vs Coalizão`
         : `Guerra de ${aggressorCountry?.name} contra ${targetNames.join(', ')}`;
 
@@ -139,6 +208,16 @@ export const WarModal: React.FC<WarModalProps> = ({
       startDay: Math.floor(Math.random() * 300) + 1,
       casualties: { attackers: 0, defenders: 0 },
       isWorldWar: targetIds.length >= 3,
+      ...(selectedTargetState && singleTargetCountry
+        ? {
+            targetState: {
+              stateId: selectedTargetState.id,
+              stateNumericId: selectedTargetState.numericId,
+              parentCountryId: singleTargetCountry.id,
+              stateName: selectedTargetState.name,
+            },
+          }
+        : {}),
     };
 
     onDeclareWar(newWar);
@@ -390,6 +469,88 @@ export const WarModal: React.FC<WarModalProps> = ({
             )}
           </div>
 
+          {/* Target Scope: Entire Country OR Specific State */}
+          {singleTargetCountry && (
+            <div className="p-3 bg-slate-950 border border-amber-500/40 rounded-lg space-y-2.5">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2 text-xs font-bold text-amber-300">
+                  <MapIcon className="w-3.5 h-3.5" />
+                  Alvo em {singleTargetCountry.name}:
+                </div>
+                <div className="flex gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      sound.playClick();
+                      setTargetScope('country');
+                      setTargetStateId('');
+                    }}
+                    className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-colors ${
+                      targetScope === 'country'
+                        ? 'bg-red-600 text-white border-red-400'
+                        : 'bg-slate-900 text-slate-300 border-slate-700 hover:text-white'
+                    }`}
+                  >
+                    País Inteiro
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleEnableStateTargeting}
+                    className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-colors ${
+                      targetScope === 'state'
+                        ? 'bg-amber-400 text-slate-950 border-amber-300'
+                        : 'bg-slate-900 text-amber-300 border-amber-500/40 hover:bg-amber-950/40'
+                    }`}
+                  >
+                    Estado Específico
+                  </button>
+                </div>
+              </div>
+
+              {targetScope === 'state' && (
+                <div className="space-y-2 pt-1 border-t border-slate-800">
+                  <p className="text-[11px] text-slate-400">
+                    Somente o estado selecionado será atacado (os outros estados de{' '}
+                    <strong>{singleTargetCountry.name}</strong> não entram nas fronteiras de combate):
+                  </p>
+                  <div className="relative">
+                    <Search className="w-3 h-3 text-slate-400 absolute left-2.5 top-2" />
+                    <input
+                      type="text"
+                      value={stateTargetSearch}
+                      onChange={(e) => setStateTargetSearch(e.target.value)}
+                      placeholder={`Buscar estado de ${singleTargetCountry.name}...`}
+                      className="w-full bg-slate-900 border border-slate-700 rounded pl-7 pr-2.5 py-1 text-xs text-white focus:outline-none focus:border-amber-400"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 max-h-32 overflow-y-auto">
+                    {singleTargetStates.map((st) => {
+                      const isStSelected = targetStateId === st.id;
+                      return (
+                        <button
+                          key={st.id}
+                          type="button"
+                          onClick={() => {
+                            sound.playClick();
+                            setTargetStateId(st.id);
+                          }}
+                          className={`flex items-center gap-1.5 p-1.5 rounded border text-left text-[11px] transition-colors ${
+                            isStSelected
+                              ? 'border-amber-400 bg-amber-500/20 text-amber-200 font-bold'
+                              : 'border-slate-800 bg-slate-900 text-slate-300 hover:bg-slate-800'
+                          }`}
+                        >
+                          <FlagView flag={st.flag || singleTargetCountry.flag} width={18} height={12} />
+                          <span className="truncate flex-1">{st.name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* War Name */}
           <div>
             <label className="text-xs font-semibold text-slate-300 block mb-1">
@@ -410,6 +571,10 @@ export const WarModal: React.FC<WarModalProps> = ({
           <div className="text-xs text-slate-400">
             {targetIds.length === 0 ? (
               'Selecione ao menos 1 alvo'
+            ) : selectedTargetState && singleTargetCountry ? (
+              <span className="text-amber-300 font-bold">
+                Alvo: Estado {selectedTargetState.name} ({singleTargetCountry.name})
+              </span>
             ) : targetIds.length >= 3 ? (
               <span className="text-red-400 font-bold flex items-center gap-1">
                 <Flame className="w-3.5 h-3.5" /> Estado de Guerra Mundial ({targetIds.length} nações)

@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Country, Alliance, War } from '../types/game';
 import { FlagView } from './FlagView';
 import { Handshake, HeartHandshake, Check, X, Globe, Search } from 'lucide-react';
 import { sound } from '../utils/audio';
+import { normalizeSearch } from '../utils/text';
 
 interface DiplomacyModalProps {
   isOpen: boolean;
@@ -45,38 +46,42 @@ export const DiplomacyModal: React.FC<DiplomacyModalProps> = ({
   const [countrySearch, setCountrySearch] = useState('');
   const [peaceSearch, setPeaceSearch] = useState('');
 
+  const wasOpenRef = useRef(false);
+
   useEffect(() => {
-    if (isOpen) {
+    if (isOpen && !wasOpenRef.current) {
       setCountrySearch('');
       setPeaceSearch('');
       if (preselectedCountryId) {
         setSelectedIds([preselectedCountryId]);
       }
     }
+    wasOpenRef.current = isOpen;
   }, [isOpen, preselectedCountryId]);
 
   const filteredCountries = useMemo(() => {
-    const q = countrySearch.trim().toLowerCase();
+    const q = normalizeSearch(countrySearch);
     const list = q
       ? countries.filter(
           (c) =>
-            c.name.toLowerCase().includes(q) ||
-            c.capital.toLowerCase().includes(q) ||
-            c.continent.toLowerCase().includes(q)
+            normalizeSearch(c.name).includes(q) ||
+            normalizeSearch(c.capital).includes(q) ||
+            normalizeSearch(c.continent).includes(q)
         )
       : countries;
     return list.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
   }, [countries, countrySearch]);
 
   const filteredWars = useMemo(() => {
-    const q = peaceSearch.trim().toLowerCase();
+    const q = normalizeSearch(peaceSearch);
     if (!q) return activeWars;
     return activeWars.filter((w) => {
-      if (w.name.toLowerCase().includes(q)) return true;
+      if (normalizeSearch(w.name).includes(q)) return true;
       const involved = [...w.attackers, ...w.defenders];
-      return involved.some((cid) =>
-        countries.find((c) => c.id === cid)?.name.toLowerCase().includes(q)
-      );
+      return involved.some((cid) => {
+        const c = countries.find((item) => item.id === cid);
+        return c ? normalizeSearch(c.name).includes(q) : false;
+      });
     });
   }, [activeWars, peaceSearch, countries]);
 

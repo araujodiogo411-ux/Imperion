@@ -25,8 +25,11 @@ import {
   Undo2,
   Search,
   Landmark,
+  DollarSign,
+  Globe2,
 } from 'lucide-react';
 import { sound } from '../utils/audio';
+import { normalizeSearch } from '../utils/text';
 
 const IDEOLOGIES: Ideology[] = [
   'República',
@@ -78,6 +81,8 @@ interface CountryDrawerProps {
   onReopenWar: (record: PastWarRecord) => void;
   onAddDecree: (countryId: string, decree: string) => void;
   onUpgradeTech: (countryId: string) => void;
+  onBuyTerritory: (buyer: Country, seller: Country, cells: number, priceBillions: number) => void;
+  onSetSovereignCountry: (countryId: string, sovereign: Country | null) => void;
 }
 
 export const CountryDrawer: React.FC<CountryDrawerProps> = ({
@@ -107,6 +112,8 @@ export const CountryDrawer: React.FC<CountryDrawerProps> = ({
   onReopenWar,
   onAddDecree,
   onUpgradeTech,
+  onBuyTerritory,
+  onSetSovereignCountry,
 }) => {
   const [newDecreeInput, setNewDecreeInput] = useState('');
   const [isRenaming, setIsRenaming] = useState(false);
@@ -121,33 +128,76 @@ export const CountryDrawer: React.FC<CountryDrawerProps> = ({
   const [transferAsState, setTransferAsState] = useState(false);
   const [transferSearch, setTransferSearch] = useState('');
 
+  // Buy Territory ($) picker state
+  const [showBuyPicker, setShowBuyPicker] = useState(false);
+  const [buySearch, setBuySearch] = useState('');
+  const [buySellerId, setBuySellerId] = useState<string>('');
+  const [buyCells, setBuyCells] = useState<number>(45);
+  const [buyPriceInput, setBuyPriceInput] = useState<string>('50');
+
+  // Sovereign / Dependency ("Pertence a") picker state
+  const [showSovereignPicker, setShowSovereignPicker] = useState(false);
+  const [sovereignSearch, setSovereignSearch] = useState('');
+
   useEffect(() => {
     setIsRenaming(false);
     setIsRenamingCap(false);
     setIsEditingPop(false);
     setShowTransferPicker(false);
     setTransferSearch('');
+    setShowBuyPicker(false);
+    setBuySearch('');
+    setBuySellerId('');
+    setShowSovereignPicker(false);
+    setSovereignSearch('');
     if (country) {
       setRenameInput(country.name);
       setCapInput(country.capital);
       setPopInput(String(Math.round(country.population * 10) / 10));
     }
-  }, [country]);
+  }, [country?.id]);
 
   const transferCandidates = useMemo(() => {
     if (!country) return [];
-    const q = transferSearch.trim().toLowerCase();
+    const q = normalizeSearch(transferSearch);
     return allCountries
       .filter((c) => c.id !== country.id && c.territoryCells > 0)
       .filter((c) =>
         !q
           ? true
-          : c.name.toLowerCase().includes(q) ||
-            c.capital.toLowerCase().includes(q) ||
-            c.continent.toLowerCase().includes(q)
+          : normalizeSearch(c.name).includes(q) ||
+            normalizeSearch(c.capital).includes(q) ||
+            normalizeSearch(c.continent).includes(q)
       )
       .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
   }, [allCountries, country, transferSearch]);
+
+  const buyCandidates = useMemo(() => {
+    if (!country) return [];
+    const q = normalizeSearch(buySearch);
+    return allCountries
+      .filter((c) => c.id !== country.id && c.territoryCells > 10)
+      .filter((c) =>
+        !q
+          ? true
+          : normalizeSearch(c.name).includes(q) ||
+            normalizeSearch(c.capital).includes(q) ||
+            normalizeSearch(c.continent).includes(q)
+      )
+      .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  }, [allCountries, country, buySearch]);
+
+  const selectedSeller = useMemo(
+    () => allCountries.find((c) => c.id === buySellerId) || null,
+    [allCountries, buySellerId]
+  );
+
+  const suggestPriceFor = (seller: Country | null, cells: number): number => {
+    if (!seller) return 50;
+    const factor = cells <= 25 ? 0.04 : cells <= 60 ? 0.09 : 0.16;
+    const base = cells <= 25 ? 15 : cells <= 60 ? 35 : 70;
+    return Math.max(5, Math.round((seller.gdp * factor + base) * 10) / 10);
+  };
 
   if (!country) return null;
 
@@ -184,7 +234,7 @@ export const CountryDrawer: React.FC<CountryDrawerProps> = ({
   );
 
   return (
-    <div className="fixed top-14 right-4 bottom-14 z-40 w-96 bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl shadow-2xl flex flex-col text-slate-100 overflow-hidden animate-in slide-in-from-right duration-200">
+    <div className="fixed top-15 left-2 right-2 bottom-2 sm:top-14 sm:left-auto sm:right-4 sm:bottom-14 sm:w-96 z-40 bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl shadow-2xl flex flex-col text-slate-100 overflow-hidden animate-in slide-in-from-right duration-200">
       {/* Top Banner / Header */}
       <div
         className="px-5 py-4 border-b border-slate-800 flex items-center justify-between gap-2"
@@ -367,7 +417,7 @@ export const CountryDrawer: React.FC<CountryDrawerProps> = ({
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2 min-w-0">
-                        <FlagView flag={st.formerCountryData!.flag} width={20} height={14} />
+                        <FlagView flag={st.flag || st.formerCountryData!.flag} width={20} height={14} />
                         <span className="font-semibold text-white truncate">{st.name}</span>
                       </div>
                       <span className="text-[10px] text-slate-400 font-mono-numbers">
@@ -441,13 +491,145 @@ export const CountryDrawer: React.FC<CountryDrawerProps> = ({
               sound.playClick();
               setTransferAsState(false);
               setShowTransferPicker((v) => !v);
+              setShowBuyPicker(false);
             }}
-            className="col-span-2 flex items-center justify-center gap-1.5 py-2 px-3 bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 border border-purple-500/40 rounded-lg font-semibold transition-colors"
+            className="flex items-center justify-center gap-1.5 py-2 px-3 bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 border border-purple-500/40 rounded-lg font-semibold transition-colors"
             title="Transferir todo o território deste país de presente para outro país"
           >
-            <Gift className="w-3.5 h-3.5" /> Dar Nação de Brinde / Transferir Território
+            <Gift className="w-3.5 h-3.5" /> Dar Nação
+          </button>
+          <button
+            onClick={() => {
+              sound.playClick();
+              setShowBuyPicker((v) => !v);
+              setShowTransferPicker(false);
+            }}
+            className="flex items-center justify-center gap-1.5 py-2 px-3 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/40 rounded-lg font-semibold transition-colors"
+            title="Usar o PIB deste país para comprar território de outra nação"
+          >
+            <DollarSign className="w-3.5 h-3.5" /> Comprar Território
           </button>
         </div>
+
+        {/* Buy Territory ($) Panel */}
+        {showBuyPicker && (
+          <div className="p-3 bg-slate-950 border border-emerald-500/40 rounded-lg space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-emerald-300 flex items-center gap-1.5">
+                <DollarSign className="w-3.5 h-3.5" /> Comprar Território (PIB: ${country.gdp.toLocaleString()} Bi)
+              </span>
+              <button
+                onClick={() => setShowBuyPicker(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+              <input
+                type="text"
+                value={buySearch}
+                onChange={(e) => setBuySearch(e.target.value)}
+                placeholder="Pesquisar país vendedor..."
+                autoFocus
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white focus:outline-none focus:border-emerald-400"
+              />
+            </div>
+
+            <div className="max-h-32 overflow-y-auto space-y-1 pr-1">
+              {buyCandidates.map((cand) => (
+                <button
+                  key={cand.id}
+                  type="button"
+                  onClick={() => {
+                    sound.playClick();
+                    setBuySellerId(cand.id);
+                    setBuyPriceInput(String(suggestPriceFor(cand, buyCells)));
+                  }}
+                  className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-left transition-colors ${
+                    buySellerId === cand.id
+                      ? 'bg-emerald-500/20 border border-emerald-500/50 text-emerald-200'
+                      : 'hover:bg-slate-900 text-slate-200'
+                  }`}
+                >
+                  <FlagView flag={cand.flag} width={20} height={14} />
+                  <span className="truncate flex-1 font-medium">{cand.name}</span>
+                  <span className="text-[10px] text-slate-400 font-mono-numbers">
+                    {cand.territoryCells} px · ${cand.gdp} Bi
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            {selectedSeller && (
+              <div className="pt-2 border-t border-slate-800 space-y-2">
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="text-slate-400">Vendedor:</span>
+                  <span className="font-bold text-white">{selectedSeller.name}</span>
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  {[
+                    { label: 'Faixa (25 px)', cells: 25 },
+                    { label: 'Província (60 px)', cells: 60 },
+                    { label: 'Região (120 px)', cells: 120 },
+                  ].map((opt) => (
+                    <button
+                      key={opt.cells}
+                      type="button"
+                      onClick={() => {
+                        setBuyCells(opt.cells);
+                        setBuyPriceInput(String(suggestPriceFor(selectedSeller, opt.cells)));
+                      }}
+                      className={`py-1 px-1.5 rounded border text-[10px] font-semibold transition-colors ${
+                        buyCells === opt.cells
+                          ? 'bg-emerald-500 text-slate-950 border-emerald-400'
+                          : 'bg-slate-900 text-slate-300 border-slate-700 hover:border-slate-500'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-slate-400 shrink-0">Oferta ($ Bi):</span>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={buyPriceInput}
+                    onChange={(e) => setBuyPriceInput(e.target.value)}
+                    className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white font-mono-numbers focus:outline-none focus:border-emerald-400"
+                  />
+                  <button
+                    type="button"
+                    disabled={
+                      Number(buyPriceInput) <= 0 ||
+                      Number(buyPriceInput) > country.gdp
+                    }
+                    onClick={() => {
+                      const price = Math.max(1, Number(buyPriceInput) || 0);
+                      if (price > country.gdp) return;
+                      sound.playPeaceChime();
+                      onBuyTerritory(country, selectedSeller, buyCells, price);
+                      setShowBuyPicker(false);
+                    }}
+                    className="px-3 py-1 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-slate-950 font-bold rounded text-[11px] transition-colors"
+                  >
+                    Comprar
+                  </button>
+                </div>
+                {Number(buyPriceInput) > country.gdp && (
+                  <p className="text-[10px] text-red-400">
+                    PIB insuficiente (${country.gdp.toLocaleString()} Bi disponíveis).
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Gift / Transfer Country Picker */}
         {showTransferPicker && (
@@ -549,6 +731,96 @@ export const CountryDrawer: React.FC<CountryDrawerProps> = ({
                 className="w-6 h-6 rounded-full border border-slate-600 bg-transparent cursor-pointer p-0 ml-1"
               />
             </div>
+          </div>
+
+          {/* Sovereign / Dependency Status ("Pertence a Outro País", ex: Groenlândia -> Dinamarca) */}
+          <div className="pt-2 border-t border-slate-800 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <span className="text-[11px] font-semibold text-slate-300 flex items-center gap-1">
+                  <Globe2 className="w-3.5 h-3.5 text-cyan-400" /> Soberania / Pertence a
+                </span>
+                {country.sovereignCountryId ? (
+                  <div className="text-[11px] text-cyan-300 font-semibold mt-0.5 truncate">
+                    Território de{' '}
+                    {allCountries.find((c) => c.id === country.sovereignCountryId)?.name ||
+                      country.sovereignCountryName ||
+                      'País Soberano'}
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-slate-400 mt-0.5">
+                    Nação totalmente soberana e independente
+                  </div>
+                )}
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                {country.sovereignCountryId && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      sound.playImperialFanfare();
+                      onSetSovereignCountry(country.id, null);
+                    }}
+                    className="px-2 py-1 bg-emerald-600/20 hover:bg-emerald-600/35 text-emerald-300 border border-emerald-500/40 rounded text-[10px] font-bold transition-colors"
+                  >
+                    Tornar Independente
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    sound.playClick();
+                    setShowSovereignPicker((v) => !v);
+                  }}
+                  className="px-2 py-1 bg-cyan-500/15 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 rounded text-[10px] font-semibold transition-colors"
+                >
+                  {country.sovereignCountryId ? 'Trocar' : 'Vincular a País...'}
+                </button>
+              </div>
+            </div>
+
+            {showSovereignPicker && (
+              <div className="p-2 bg-slate-900 border border-cyan-500/40 rounded-lg space-y-1.5">
+                <div className="relative">
+                  <Search className="w-3 h-3 text-slate-400 absolute left-2 top-2" />
+                  <input
+                    type="text"
+                    value={sovereignSearch}
+                    onChange={(e) => setSovereignSearch(e.target.value)}
+                    placeholder="Buscar país soberano (ex: Dinamarca)..."
+                    autoFocus
+                    className="w-full bg-slate-950 border border-slate-700 rounded pl-7 pr-2 py-1 text-[11px] text-white focus:outline-none focus:border-cyan-400"
+                  />
+                </div>
+                <div className="max-h-32 overflow-y-auto space-y-1">
+                  {allCountries
+                    .filter(
+                      (cand) =>
+                        cand.id !== country.id &&
+                        cand.territoryCells > 0 &&
+                        (!normalizeSearch(sovereignSearch) ||
+                          normalizeSearch(cand.name).includes(normalizeSearch(sovereignSearch)))
+                    )
+                    .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'))
+                    .map((cand) => (
+                      <button
+                        key={cand.id}
+                        type="button"
+                        onClick={() => {
+                          sound.playClick();
+                          onSetSovereignCountry(country.id, cand);
+                          setShowSovereignPicker(false);
+                        }}
+                        className="w-full flex items-center gap-2 px-2 py-1 rounded hover:bg-cyan-950/60 text-left text-[11px] text-slate-200 transition-colors"
+                      >
+                        <FlagView flag={cand.flag} width={18} height={12} />
+                        <span className="truncate flex-1">{cand.name}</span>
+                        <span className="text-[10px] text-cyan-300 font-semibold">Vincular</span>
+                      </button>
+                    ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
